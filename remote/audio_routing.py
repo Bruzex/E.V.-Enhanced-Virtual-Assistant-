@@ -27,8 +27,10 @@ from core.event_bus import EventBus, get_event_bus
 
 try:
     import pyaudio  # type: ignore
+    _pa_test = pyaudio.PyAudio()
+    _pa_test.terminate()
     PYAUDIO_AVAILABLE = True
-except ImportError:
+except Exception:
     pyaudio = None  # type: ignore
     PYAUDIO_AVAILABLE = False
 
@@ -57,7 +59,7 @@ class AudioRouter:
         self.bus = event_bus or get_event_bus()
         self.logger = logging.getLogger("ev.audio_routing")
 
-        ar_cfg = config.get("remote", {}).get("audio_routing", {})
+        ar_cfg = self.config.get("remote", {}).get("audio_routing", {})
         self.enabled: bool = bool(ar_cfg.get("enabled", True))
         self.cable_input_hint: str = str(
             ar_cfg.get("virtual_cable_input_Hint")

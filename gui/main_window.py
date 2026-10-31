@@ -45,26 +45,48 @@ try:
     )
     QT_VERSION = 6
 except ImportError:
-    from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal  # type: ignore
-    from PyQt5.QtGui import (  # type: ignore
-        QBrush,
-        QColor,
-        QKeyEvent,
-        QMouseEvent,
-        QPainter,
-        QPen,
-        QRadialGradient,
-    )
-    from PyQt5.QtWidgets import (  # type: ignore
-        QFrame,
-        QHBoxLayout,
-        QLabel,
-        QMainWindow,
-        QPushButton,
-        QVBoxLayout,
-        QWidget,
-    )
-    QT_VERSION = 5
+    try:
+        from PySide6.QtCore import QPointF, Qt, QTimer, Signal as pyqtSignal  # type: ignore
+        from PySide6.QtGui import (  # type: ignore
+            QBrush,
+            QColor,
+            QKeyEvent,
+            QMouseEvent,
+            QPainter,
+            QPen,
+            QRadialGradient,
+        )
+        from PySide6.QtWidgets import (  # type: ignore
+            QFrame,
+            QHBoxLayout,
+            QLabel,
+            QMainWindow,
+            QPushButton,
+            QVBoxLayout,
+            QWidget,
+        )
+        QT_VERSION = 6
+    except ImportError:
+        from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal  # type: ignore
+        from PyQt5.QtGui import (  # type: ignore
+            QBrush,
+            QColor,
+            QKeyEvent,
+            QMouseEvent,
+            QPainter,
+            QPen,
+            QRadialGradient,
+        )
+        from PyQt5.QtWidgets import (  # type: ignore
+            QFrame,
+            QHBoxLayout,
+            QLabel,
+            QMainWindow,
+            QPushButton,
+            QVBoxLayout,
+            QWidget,
+        )
+        QT_VERSION = 5
 
 from gui.overlays import (
     DEFAULT_WORKSPACE_ITEMS,

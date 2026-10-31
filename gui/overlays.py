@@ -41,19 +41,34 @@ try:
     )
     QT_VERSION = 6
 except ImportError:
-    from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal  # type: ignore
-    from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF  # type: ignore
-    from PyQt5.QtWidgets import (  # type: ignore
-        QFrame,
-        QGridLayout,
-        QHBoxLayout,
-        QLabel,
-        QPushButton,
-        QScrollArea,
-        QVBoxLayout,
-        QWidget,
-    )
-    QT_VERSION = 5
+    try:
+        from PySide6.QtCore import QPointF, QRectF, Qt, Signal as pyqtSignal  # type: ignore
+        from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF  # type: ignore
+        from PySide6.QtWidgets import (  # type: ignore
+            QFrame,
+            QGridLayout,
+            QHBoxLayout,
+            QLabel,
+            QPushButton,
+            QScrollArea,
+            QVBoxLayout,
+            QWidget,
+        )
+        QT_VERSION = 6
+    except ImportError:
+        from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal  # type: ignore
+        from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPolygonF  # type: ignore
+        from PyQt5.QtWidgets import (  # type: ignore
+            QFrame,
+            QGridLayout,
+            QHBoxLayout,
+            QLabel,
+            QPushButton,
+            QScrollArea,
+            QVBoxLayout,
+            QWidget,
+        )
+        QT_VERSION = 5
 
 from gui.status_orb import (
     COLOR_CYAN,

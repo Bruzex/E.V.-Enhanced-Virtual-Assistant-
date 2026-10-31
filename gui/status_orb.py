@@ -44,19 +44,34 @@ try:
     from PyQt6.QtWidgets import QSizePolicy, QWidget
     QT_VERSION = 6
 except ImportError:
-    from PyQt5.QtCore import QPointF, QRectF, Qt  # type: ignore
-    from PyQt5.QtGui import (  # type: ignore
-        QBrush,
-        QColor,
-        QLinearGradient,
-        QPainter,
-        QPainterPath,
-        QPen,
-        QPolygonF,
-        QRadialGradient,
-    )
-    from PyQt5.QtWidgets import QSizePolicy, QWidget  # type: ignore
-    QT_VERSION = 5
+    try:
+        from PySide6.QtCore import QPointF, QRectF, Qt  # type: ignore
+        from PySide6.QtGui import (  # type: ignore
+            QBrush,
+            QColor,
+            QLinearGradient,
+            QPainter,
+            QPainterPath,
+            QPen,
+            QPolygonF,
+            QRadialGradient,
+        )
+        from PySide6.QtWidgets import QSizePolicy, QWidget  # type: ignore
+        QT_VERSION = 6
+    except ImportError:
+        from PyQt5.QtCore import QPointF, QRectF, Qt  # type: ignore
+        from PyQt5.QtGui import (  # type: ignore
+            QBrush,
+            QColor,
+            QLinearGradient,
+            QPainter,
+            QPainterPath,
+            QPen,
+            QPolygonF,
+            QRadialGradient,
+        )
+        from PyQt5.QtWidgets import QSizePolicy, QWidget  # type: ignore
+        QT_VERSION = 5
 
 
 # =============================================================================

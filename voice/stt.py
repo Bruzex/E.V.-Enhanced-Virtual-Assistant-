@@ -2,35 +2,64 @@
 """
 E.V. (Enhanced Virtual Assistant) — Offline Speech-to-Text (Vosk)
 =================================================================
-Local, privacy-preserving speech recognizer utilizing the lightweight
-vosk-model-small-en-us (~50 MB footprint, CPU only).
+Lightweight (~50 MB RAM) offline speech recognition engine powered by Vosk
+(`vosk-model-small-en-us`) and PyAudio / sounddevice.
 
-Features:
-  - Streaming audio input via PyAudio with sounddevice fallback.
-  - Streaming partial and final transcription hypotheses.
-  - Echo-suppression gate: listens to Topics.VOICE_TTS_STARTED and
-    Topics.VOICE_TTS_FINISHED to mute mic ingestion while E.V. is speaking.
-  - Exposes create_recognizer(), iter_mic_chunks(), feed_pcm_chunk(), and
-    listen_once() methods expected by WakeWordLoop and SystemBridge.
+Key Features:
+  - Echo Suppression Gate: Automatically pauses microphone capture while Piper
+    TTS is speaking so E.V. never transcribes its own voice.
+  - Streaming Partial & Final Hypotheses: Publishes `VOICE_PARTIAL_TRANSCRIPT`
+    for live HUD feedback and `VOICE_FINAL_TRANSCRIPT` when an utterance completes.
+  - Graceful Degradation: If no microphone or Vosk model directory is present,
+    marks the HUD `mic` indicator accordingly without crashing the application.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
-from core.event_bus import Event, EventBus, Topics, get_event_bus
+from core.event_bus import EventBus, Topics, get_event_bus
 
-logger = logging.getLogger("ev.voice.stt")
+VOSK_IMPORT_ERROR: Optional[str] = None
+try:
+    from vosk import KaldiRecognizer, Model, SetLogLevel  # type: ignore
+    SetLogLevel(-1)
+    VOSK_AVAILABLE = True
+except Exception as _vosk_exc:
+    KaldiRecognizer = None  # type: ignore
+    Model = None  # type: ignore
+    VOSK_AVAILABLE = False
+    VOSK_IMPORT_ERROR = str(_vosk_exc)
+
+try:
+    import pyaudio  # type: ignore
+    _pa_test = pyaudio.PyAudio()
+    _pa_test.terminate()
+    PYAUDIO_AVAILABLE = True
+except Exception:
+    pyaudio = None  # type: ignore
+    PYAUDIO_AVAILABLE = False
+
+try:
+    import sounddevice as sd  # type: ignore
+    SOUNDDEVICE_AVAILABLE = True
+except ImportError:
+    sd = None  # type: ignore
+    SOUNDDEVICE_AVAILABLE = False
 
 
 class VoskSTT:
-    """Offline STT stream processor powered by Vosk."""
+    """
+    Offline Vosk Speech-to-Text engine supporting both single-utterance capture
+    and continuous streaming recognition for the Wake-Word / Command loop.
+    """
 
     def __init__(
         self,
@@ -41,95 +70,101 @@ class VoskSTT:
         self.config = config
         self.base_dir = base_dir
         self.bus = event_bus or get_event_bus()
-        self.voice_cfg = config.get("voice", {}).get("stt", {})
-        self.model_rel = self.voice_cfg.get("model_path", "models/vosk-model-small-en-us")
-        self.model_path = (self.base_dir / self.model_rel).resolve()
-        self.sample_rate = int(self.voice_cfg.get("sample_rate", 16000))
+        self.logger = logging.getLogger("ev.stt")
 
-        self._model: Any = None
-        self._recognizer: Any = None
-        self._lock = threading.Lock()
-        self._muted_for_tts = False
+        stt_cfg = config.get("voice", {}).get("stt", {})
+        rel_model = str(stt_cfg.get("model_path", "models/vosk-model-small-en-us"))
+        self.model_path: Path = (
+            (base_dir / rel_model).resolve() if not os.path.isabs(rel_model) else Path(rel_model)
+        )
+        self.sample_rate: int = int(stt_cfg.get("sample_rate", 16000))
+        self.chunk_size: int = int(stt_cfg.get("chunk_size", 4000))
+        self.device_index: Optional[int] = stt_cfg.get("input_device_index")
 
-        if self.bus is not None:
-            self.bus.subscribe(Topics.VOICE_TTS_STARTED, self._on_tts_started)
-            self.bus.subscribe(Topics.VOICE_TTS_FINISHED, self._on_tts_finished)
+        self._model: Optional[Any] = None
+        self._recognizer: Optional[Any] = None
+        self._lock = threading.RLock()
+        self._muted_for_tts = threading.Event()
+        self._audio_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=64)
 
-    def _on_tts_started(self, event: Event) -> None:
-        """Echo suppression: mute STT while assistant is speaking."""
-        self._muted_for_tts = True
-        logger.debug("Echo suppression engaged: STT muted during TTS output.")
-
-    def _on_tts_finished(self, event: Event) -> None:
-        """Echo suppression: unmute STT once assistant finishes speaking."""
-        self._muted_for_tts = False
-        logger.debug("Echo suppression released: STT unmuted.")
+        # Automatically mute STT while E.V. is speaking to prevent self-triggering
+        self.bus.subscribe(Topics.VOICE_TTS_STARTED, lambda _: self.set_tts_mute(True))
+        self.bus.subscribe(Topics.VOICE_TTS_FINISHED, lambda _: self.set_tts_mute(False))
 
     @property
     def is_muted(self) -> bool:
-        return self._muted_for_tts
+        return self._muted_for_tts.is_set()
 
     @property
     def is_ready(self) -> bool:
-        """Return True if Vosk model is loaded or available to load."""
-        if self._model is not None:
-            return True
-        return self.is_model_available()
+        return self._model is not None and (PYAUDIO_AVAILABLE or SOUNDDEVICE_AVAILABLE)
 
-    def is_model_available(self) -> bool:
-        """Verify model directory exists."""
-        return self.model_path.is_dir()
+    def set_tts_mute(self, muted: bool) -> None:
+        """Pause or resume microphone ingestion while TTS audio is playing."""
+        if muted:
+            self._muted_for_tts.set()
+            self._drain_queue()
+        else:
+            self._muted_for_tts.clear()
+
+    def _drain_queue(self) -> None:
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
 
     def load_model(self) -> bool:
-        """Load Vosk model into memory."""
-        if self._model is not None:
-            return True
-
-        if not self.is_model_available():
-            logger.info("Vosk model not found at %s. Standing by for download.", self.model_path)
-            return False
-
+        """Initialize the Vosk acoustic model (~50 MB footprint)."""
         with self._lock:
             if self._model is not None:
                 return True
-            try:
-                from vosk import KaldiRecognizer, Model, SetLogLevel
 
-                SetLogLevel(-1)
-                logger.info("Loading Vosk STT model from %s...", self.model_path.name)
+            if not VOSK_AVAILABLE:
+                self.logger.warning(
+                    "Vosk library could not be loaded (%s). Voice STT running in simulated/GUI mode.",
+                    VOSK_IMPORT_ERROR or "package not installed",
+                )
+                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"}, source="stt")
+                return False
+
+            if not self.model_path.exists():
+                self.logger.warning(
+                    "Vosk model directory not found at %s. Download vosk-model-small-en-us there for live mic STT.",
+                    self.model_path,
+                )
+                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"}, source="stt")
+                return False
+
+            try:
+                self.logger.info("Loading Vosk offline STT model from %s...", self.model_path)
                 self._model = Model(str(self.model_path))
                 self._recognizer = KaldiRecognizer(self._model, self.sample_rate)
-                logger.info("Vosk STT ready.")
+                self._recognizer.SetWords(True)
+                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "online"}, source="stt")
                 return True
-            except ImportError:
-                logger.warning("vosk package is not installed.")
-                return False
             except Exception as exc:
-                logger.error("Failed to load Vosk model: %s", exc)
+                self.logger.error("Failed to load Vosk model: %s", exc)
+                self._model = None
+                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"}, source="stt")
                 return False
 
-    def create_recognizer(self) -> Optional[Any]:
-        """Create a new KaldiRecognizer instance for a listening session."""
-        if not self.load_model():
+    def create_recognizer(self, grammar: Optional[list[str]] = None) -> Optional[Any]:
+        """Create a dedicated KaldiRecognizer instance (optionally constrained to a phrase list)."""
+        if not self.load_model() or self._model is None:
             return None
-        try:
-            from vosk import KaldiRecognizer
+        if grammar:
+            return KaldiRecognizer(self._model, self.sample_rate, json.dumps(grammar))
+        rec = KaldiRecognizer(self._model, self.sample_rate)
+        rec.SetWords(True)
+        return rec
 
-            return KaldiRecognizer(self._model, self.sample_rate)
-        except Exception as exc:
-            logger.error("Failed to create KaldiRecognizer: %s", exc)
-            return None
-
-    def feed_pcm_chunk(
-        self,
-        pcm_chunk: bytes,
-        recognizer: Optional[Any] = None,
-    ) -> Tuple[bool, str]:
+    def feed_pcm_chunk(self, pcm_bytes: bytes, recognizer: Optional[Any] = None) -> tuple[bool, str]:
         """
-        Feed a raw 16-bit mono PCM buffer to the Vosk recognizer.
-        Returns (is_final, transcript).
+        Feed a raw 16-bit mono PCM chunk into Vosk.
+        Returns `(is_final, text)`.
         """
-        if self._muted_for_tts:
+        if self._muted_for_tts.is_set() or not pcm_bytes:
             return False, ""
 
         rec = recognizer or self._recognizer
@@ -137,71 +172,95 @@ class VoskSTT:
             return False, ""
 
         try:
-            if rec.AcceptWaveform(pcm_chunk):
-                res = json.loads(rec.Result())
+            if rec.AcceptWaveform(pcm_bytes):
+                res = json.loads(rec.Result() or "{}")
                 text = str(res.get("text", "")).strip()
-                if text and self.bus is not None:
+                if text:
                     self.bus.publish(
                         Topics.VOICE_FINAL_TRANSCRIPT,
-                        {"text": text},
+                        {"text": text, "confidence": 1.0},
                         source="stt",
                     )
                 return True, text
             else:
-                partial = json.loads(rec.PartialResult())
-                p_text = str(partial.get("partial", "")).strip()
-                if p_text and self.bus is not None:
+                part = json.loads(rec.PartialResult() or "{}")
+                partial_text = str(part.get("partial", "")).strip()
+                if partial_text:
                     self.bus.publish(
                         Topics.VOICE_PARTIAL_TRANSCRIPT,
-                        {"text": p_text},
+                        {"text": partial_text},
                         source="stt",
                     )
-                return False, p_text
+                return False, partial_text
         except Exception as exc:
-            logger.debug("Error feeding PCM chunk to Vosk: %s", exc)
+            self.logger.debug("Vosk recognition error: %s", exc)
             return False, ""
+
+    def listen_once(self, timeout_seconds: float = 6.0) -> str:
+        """
+        Capture a single spoken command from the microphone up to `timeout_seconds`.
+        Returns the final transcribed string (or empty string on silence/timeout).
+        """
+        if not self.load_model():
+            return ""
+
+        rec = self.create_recognizer()
+        if rec is None:
+            return ""
+
+        self.bus.publish(Topics.VOICE_LISTENING_STARTED, {}, source="stt")
+        deadline = time.monotonic() + max(1.0, timeout_seconds)
+        last_partial = ""
+        final_text = ""
+
+        try:
+            for pcm_chunk in self.iter_mic_chunks(stop_check=lambda: time.monotonic() >= deadline):
+                is_final, text = self.feed_pcm_chunk(pcm_chunk, recognizer=rec)
+                if is_final and text:
+                    final_text = text
+                    break
+                elif text:
+                    last_partial = text
+
+            if not final_text:
+                flush = json.loads(rec.FinalResult() or "{}")
+                final_text = str(flush.get("text", "")).strip() or last_partial
+        finally:
+            self.bus.publish(Topics.VOICE_LISTENING_STOPPED, {}, source="stt")
+
+        return final_text
 
     def iter_mic_chunks(
         self,
-        stop_check: Optional[Callable[[], bool]] = None,
+        stop_check: Callable[[], bool],
         on_raw_chunk: Optional[Callable[[bytes], None]] = None,
-        chunk_samples: int = 4000,
-    ) -> Generator[bytes, None, None]:
+    ):
         """
-        Yield 16-bit mono PCM audio chunks from the microphone.
-        Tries PyAudio first, with sounddevice as fallback.
+        Generator yielding 16-bit 16kHz mono PCM byte chunks from either PyAudio
+        or sounddevice until `stop_check()` returns True.
         """
-        # Strategy A: PyAudio
-        pyaudio_available = False
-        try:
-            import pyaudio
-
-            pyaudio_available = True
-        except ImportError:
-            pass
-
-        if pyaudio_available:
-            pa: Any = None
-            stream: Any = None
+        if PYAUDIO_AVAILABLE:
+            pa = pyaudio.PyAudio()
+            stream = None
             try:
-                pa = pyaudio.PyAudio()
-                stream = pa.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=self.sample_rate,
-                    input=True,
-                    frames_per_buffer=chunk_samples,
-                )
-                logger.info("Microphone input opened via PyAudio.")
-                while stop_check is None or not stop_check():
-                    data = stream.read(chunk_samples, exception_on_overflow=False)
+                kwargs: Dict[str, Any] = {
+                    "format": pyaudio.paInt16,
+                    "channels": 1,
+                    "rate": self.sample_rate,
+                    "input": True,
+                    "frames_per_buffer": self.chunk_size,
+                }
+                if self.device_index is not None:
+                    kwargs["input_device_index"] = int(self.device_index)
+                stream = pa.open(**kwargs)
+                while not stop_check():
+                    data = stream.read(self.chunk_size, exception_on_overflow=False)
                     if on_raw_chunk is not None:
                         on_raw_chunk(data)
-                    if not self._muted_for_tts:
-                        yield data
-                return
+                    yield data
             except Exception as exc:
-                logger.debug("PyAudio stream failed or unavailable: %s. Falling back to sounddevice.", exc)
+                self.logger.error("PyAudio microphone stream error: %s", exc)
+                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"}, source="stt")
             finally:
                 if stream is not None:
                     try:
@@ -209,79 +268,36 @@ class VoskSTT:
                         stream.close()
                     except Exception:
                         pass
-                if pa is not None:
-                    try:
-                        pa.terminate()
-                    except Exception:
-                        pass
+                pa.terminate()
 
-        # Strategy B: sounddevice
-        sounddevice_available = False
-        try:
-            import sounddevice as sd
+        elif SOUNDDEVICE_AVAILABLE:
+            q: "queue.Queue[bytes]" = queue.Queue()
 
-            sounddevice_available = True
-        except ImportError:
-            pass
-
-        if sounddevice_available:
-            audio_q: queue.Queue[bytes] = queue.Queue()
-
-            def _callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
-                audio_q.put(bytes(indata))
+            def _sd_callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+                q.put(bytes(indata))
 
             try:
                 with sd.RawInputStream(
                     samplerate=self.sample_rate,
-                    blocksize=chunk_samples,
+                    blocksize=self.chunk_size,
+                    device=self.device_index,
                     dtype="int16",
                     channels=1,
-                    callback=_callback,
+                    callback=_sd_callback,
                 ):
-                    logger.info("Microphone input opened via sounddevice.")
-                    while stop_check is None or not stop_check():
+                    while not stop_check():
                         try:
-                            chunk = audio_q.get(timeout=0.15)
+                            data = q.get(timeout=0.25)
+                            if on_raw_chunk is not None:
+                                on_raw_chunk(data)
+                            yield data
                         except queue.Empty:
                             continue
-                        if on_raw_chunk is not None:
-                            on_raw_chunk(chunk)
-                        if not self._muted_for_tts:
-                            yield chunk
-                    return
             except Exception as exc:
-                logger.debug("sounddevice stream failed: %s", exc)
-
-        # Strategy C: Simulated/No-Mic fallback
-        logger.warning("No functional audio input device available. Microphone loop standing by.")
-        while stop_check is None or not stop_check():
-            time.sleep(0.2)
-
-    def listen_once(self, timeout_seconds: float = 6.0) -> str:
-        """
-        Record a single utterance from the microphone until a final transcript
-        is recognized or timeout_seconds elapses.
-        """
-        if not self.load_model():
-            logger.warning("Vosk STT model not loaded; cannot perform live speech recognition.")
-            return ""
-
-        rec = self.create_recognizer()
-        if rec is None:
-            return ""
-
-        deadline = time.monotonic() + timeout_seconds
-        last_partial = ""
-
-        for chunk in self.iter_mic_chunks(stop_check=lambda: time.monotonic() > deadline):
-            is_final, text = self.feed_pcm_chunk(chunk, recognizer=rec)
-            if is_final and text:
-                return text
-            if text:
-                last_partial = text
-
-        return last_partial
-
-
-# Alias for backward compatibility
-SpeechToText = VoskSTT
+                self.logger.error("SoundDevice microphone stream error: %s", exc)
+                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"}, source="stt")
+        else:
+            self.logger.warning("Neither PyAudio nor sounddevice is available for live microphone capture.")
+            while not stop_check():
+                time.sleep(0.25)
+                break

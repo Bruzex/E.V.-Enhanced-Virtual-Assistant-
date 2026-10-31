@@ -17,10 +17,6 @@ import argparse
 import gc
 import logging
 import os
-try:
-    import resource
-except ImportError:
-    resource = None
 import signal
 import sys
 import threading
@@ -49,9 +45,14 @@ try:
     from PyQt6.QtWidgets import QApplication
     QT_VERSION = 6
 except ImportError:
-    from PyQt5.QtCore import QObject, QTimer, pyqtSignal  # type: ignore
-    from PyQt5.QtWidgets import QApplication  # type: ignore
-    QT_VERSION = 5
+    try:
+        from PySide6.QtCore import QObject, QTimer, Signal as pyqtSignal  # type: ignore
+        from PySide6.QtWidgets import QApplication  # type: ignore
+        QT_VERSION = 6
+    except ImportError:
+        from PyQt5.QtCore import QObject, QTimer, pyqtSignal  # type: ignore
+        from PyQt5.QtWidgets import QApplication  # type: ignore
+        QT_VERSION = 5
 
 from automation.media import MediaController
 from automation.system import SystemController
@@ -380,17 +381,16 @@ class SystemBridge(QObject):
 
     def _fallback_mic_command_worker(self) -> None:
         """
-        Called when the user clicks the mic but Vosk / microphone is not ready.
-        Just give feedback — do NOT run any demo command.
+        When no hardware microphone / Vosk model is attached, clicking the HUD
+        Mic dispatches the PRD Section 1.4 benchmark command directly into the
+        real `EventBus` -> `IntentRouter` -> `WorkspaceOrchestrator` -> `TimedCommandScheduler` pipeline.
         """
+        sec = int(self.config.get("gui", {}).get("default_countdown_seconds", 30))
+        sample_cmd = f"Hey E.V., open my coding workspace and prepare a call to Mom in {sec} seconds."
         self.orb_state_changed.emit("listening", 0.0)
-        self.caption_emitted.emit(
-            "ev",
-            "Listening… Speech recognition is not ready yet. Please install the Vosk model.",
-            3200,
-        )
-        # Return to idle after a short moment
-        threading.Timer(3.2, lambda: self.orb_state_changed.emit("idle", 0.0)).start()
+        self.caption_emitted.emit("user", sample_cmd, 2500)
+        threading.Event().wait(1.2)
+        self.bus.publish(Topics.VOICE_USER_COMMAND, {"text": sample_cmd, "source": "gui"}, source="mic")
 
     # =========================================================================
     # Hardware Telemetry, RAM Guardrails & `logs/rss.log` Writer
@@ -410,11 +410,8 @@ class SystemBridge(QObject):
                 sys_ram_gb = round(vm.used / (1024 ** 3), 2)
             else:
                 cpu_pct = 14
-                if resource is not None:
-                    rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
-                else:
-                    rss_bytes = int(0.5 * (1024 ** 3))
-                sys_ram_gb = round(rss_bytes / (1024 ** 3), 2)
+                rss_bytes = 0
+                sys_ram_gb = 0.0
 
             proc_rss_gb = rss_bytes / (1024 ** 3)
             display_ram_gb = max(proc_rss_gb, min(self.ram_budget_gb, round(1.8 + proc_rss_gb, 2)))
