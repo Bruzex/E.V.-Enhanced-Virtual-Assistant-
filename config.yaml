@@ -1,7 +1,6 @@
 # =============================================================================
-# E.V. (Enhanced Virtual Assistant) — Configuration Specification
-# Hardware Target: MSI Bravo 15 (16 GB RAM, AMD Radeon RX 6500M -> 0 VRAM)
-# Constraint: Peak RAM <= 4.0 GB | Strict CPU-only inference (n_gpu_layers=0)
+# E.V. (Enhanced Virtual Assistant) - Master Configuration (v2.0 Final)
+# Target: MSI Bravo 15 (16 GB System RAM | AMD RX 6500M -> 0 MB VRAM)
 # =============================================================================
 
 app:
@@ -18,34 +17,107 @@ hardware:
   ram_warning_threshold_gb: 3.4
   ram_critical_threshold_gb: 3.8
   monitor_interval_ms: 1000
+  rss_log_interval_seconds: 10
   strict_cpu_only: true
   aggressive_gc: true
 
 llm:
   provider: "llama_cpp"
   model_path: "models/qwen2.5-3b-instruct-q4_k_m.gguf"
+  # HARD CONSTRAINT: RX 6500M crashes on LLM tokenization; NEVER change from 0
   n_gpu_layers: 0
   n_ctx: 2048
+  n_batch: 256
   n_threads: 6
-  temperature: 0.7
-  max_tokens: 512
+  n_threads_batch: 6
+  use_mmap: true
+  use_mlock: false
+  temperature: 0.3
+  top_p: 0.9
+  max_tokens: 256
+  unload_after_idle_seconds: 300
+  system_prompt: >
+    You are E.V. (Enhanced Virtual Assistant), a calm, concise, local-first
+    sci-fi AI assistant inspired by JARVIS. Keep responses under 2 sentences
+    so they can be spoken naturally via TTS.
 
 voice:
-  stt:
-    model_path: "models/vosk-model-small-en-us"
-    sample_rate: 16000
-  tts:
-    model_path: "models/piper"
-    voice_name: "en_US-lessac-medium"
-    speed: 1.0
   wake_word:
     enabled: true
-    phrase: "hey ev"
+    phrases:
+      - "hey ev"
+      - "hey e v"
+      - "hey e.v."
+      - "okay ev"
     continuous_listening: false
+    command_timeout_seconds: 6.0
+    energy_gate_threshold: 0.004
+
+  stt:
+    engine: "vosk"
+    model_path: "models/vosk-model-small-en-us"
+    sample_rate: 16000
+    chunk_size: 4000
+    input_device_index: null
+
+  tts:
+    engine: "piper"
+    model_path: "models/piper/en_US-lessac-medium.onnx"
+    config_path: "models/piper/en_US-lessac-medium.onnx.json"
+    speaker_id: 0
+    length_scale: 0.95
+    noise_scale: 0.667
+    output_device_index: null
+
   clap_detector:
     enabled: true
-    threshold: 0.65
-    window_sec: 0.8
+    required_claps: 2
+    energy_threshold: 0.32
+    double_clap_min_gap_ms: 120
+    double_clap_max_gap_ms: 480
+    cooldown_seconds: 1.5
+    action: "toggle_listening"
+
+automation:
+  workspaces_dir: "data/workspaces"
+  default_workspace: "coding"
+  sequential_delay_ms: 520
+  undo_delay_ms: 150
+  max_parallel_group: 2
+  execute_os_actions: true
+  web_search_max_results: 4
+
+remote:
+  whatsapp:
+    enabled: false
+    headless: true
+    chrome_profile_dir: "data/chrome_whatsapp_profile"
+    poll_interval_seconds: 5.0
+
+  phone_adb:
+    enabled: true
+    host: "192.168.1.105"
+    port: 5555
+    adb_binary: "adb"
+    connect_timeout_seconds: 3.0
+    unlock_pin: null
+    contacts:
+      mom:
+        name: "Mom"
+        number: "+1 (555) 014-2290"
+        meta: "Mobile · via phone bridge"
+
+  audio_routing:
+    enabled: true
+    virtual_cable_input_hint: "CABLE Input (VB-Audio Virtual Cable)"
+    virtual_cable_output_hint: "CABLE Output (VB-Audio Virtual Cable)"
+
+memory:
+  enabled: true
+  sqlite_path: "data/memory.db"
+  chroma_dir: "data/chroma"
+  collection_name: "ev_long_term_memory"
+  top_k: 3
 
 gui:
   title: "E.V. — Enhanced Virtual Assistant"
@@ -61,19 +133,15 @@ gui:
   scanlines: true
   minimal_ui: false
   default_countdown_seconds: 30
-
-remote:
-  phone_adb:
-    enabled: false
-    device_ip: "192.168.1.100"
-    port: 5555
-  whatsapp:
-    enabled: false
-    profile_dir: "data/whatsapp_profile"
-  audio_routing:
-    cable_input_name: "CABLE Input (VB-Audio Virtual Cable)"
-
-memory:
-  sqlite_path: "data/memory.db"
-  chroma_dir: "data/chroma"
-
+  theme:
+    bg: "#0B0F19"
+    deep: "#060912"
+    panel: "#0D1422"
+    line: "#1B2A3F"
+    cyan: "#00D4FF"
+    purple: "#7B61FF"
+    text: "#E6F4FF"
+    muted: "#8AA4BF"
+    faint: "#4A6079"
+    danger: "#FF4D6D"
+    success: "#3DF5A7"

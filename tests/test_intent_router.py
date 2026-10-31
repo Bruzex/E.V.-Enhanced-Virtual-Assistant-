@@ -1,94 +1,165 @@
+#!/usr/bin/env python3
 """
-Unit Tests for E.V. Intent Router (Phase 2 Fast-Path Registry & Fallback)
-========================================================================
-Validates fast-path parsing for chained workflows, timed events, workspaces,
-media, volume, search, system telemetry, and chat fallback.
+Unit tests for `core/intent_router.py`, `core/scheduler.py`, `voice/clap_detector.py`,
+and `memory/rag.py`. Runs 100% offline without requiring a physical microphone,
+Android phone, or Selenium Chrome browser.
 """
 
+from __future__ import annotations
+
+import struct
+import time
+import unittest
+from pathlib import Path
+import tempfile
+import yaml
+
+from core.event_bus import EventBus, Topics
 from core.intent_router import IntentRouter
+from core.scheduler import TimedCommandScheduler
+from memory.rag import RAGMemoryManager
+from remote.phone_adb import PhoneADBController
+from remote.whatsapp import WhatsAppController
+from voice.clap_detector import ClapDetector
 
 
-def test_chained_workspace_and_call() -> None:
-    router = IntentRouter()
-    cmd = "Hey E.V., open my coding workspace and prepare a call to Mom in 30 seconds."
-    parsed = router.route(cmd)
+class MockBrain:
+    def __init__(self) -> None:
+        self.calls: int = 0
+        self.last_prompt: str = ""
+        self.last_context: str | None = None
 
-    assert parsed.intent_type == "chained_workflow"
-    assert parsed.action == "workspace_and_timed_call"
-    assert parsed.params["workspace"] == "coding"
-    assert parsed.params["contact"] == "Mom"
-    assert parsed.params["delay_seconds"] == 30
-    assert parsed.bypass_llm is True
-    assert parsed.handled_by_fast_path is True
-
-
-def test_timed_command_dim_lights() -> None:
-    router = IntentRouter()
-    cmd = "dim desk lights to 30% in 10 seconds"
-    parsed = router.route(cmd)
-
-    assert parsed.intent_type == "timed_command"
-    assert parsed.params["delay_seconds"] == 10
-    assert "dim" in parsed.params["command"].lower()
-    assert parsed.bypass_llm is True
+    def generate(self, prompt: str, extra_context: str | None = None) -> str:
+        self.calls += 1
+        self.last_prompt = prompt
+        self.last_context = extra_context
+        return f"LLM answered: {prompt}"
 
 
-def test_workspace_undo() -> None:
-    router = IntentRouter()
-    parsed = router.route("undo workspace")
+class TestIntentRouterAndPhase3(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.base_dir = Path(self.tmp_dir.name)
+        self.config = {
+            "hardware": {"ram_budget_gb": 4.0},
+            "gui": {"default_countdown_seconds": 30},
+            "voice": {
+                "clap_detector": {
+                    "enabled": True,
+                    "required_claps": 2,
+                    "energy_threshold": 0.32,
+                    "double_clap_min_gap_ms": 100,
+                    "double_clap_max_gap_ms": 500,
+                    "cooldown_seconds": 0.5,
+                }
+            },
+            "memory": {
+                "enabled": True,
+                "sqlite_path": "data/memory.db",
+                "chroma_dir": "data/chroma",
+            },
+            "remote": {
+                "phone_adb": {"enabled": True, "host": "127.0.0.1", "port": 5555},
+                "whatsapp": {"enabled": False},
+            },
+        }
+        self.bus = EventBus()
+        self.brain = MockBrain()
+        self.rag = RAGMemoryManager(self.config, self.base_dir)
+        self.phone = PhoneADBController(self.config, self.base_dir, event_bus=self.bus)
+        self.whatsapp = WhatsAppController(self.config, self.base_dir, event_bus=self.bus)
+        self.scheduler = TimedCommandScheduler(self.config, event_bus=self.bus, phone_adb=self.phone)
+        self.router = IntentRouter(
+            config=self.config,
+            brain=self.brain,
+            scheduler=self.scheduler,
+            phone_adb=self.phone,
+            whatsapp=self.whatsapp,
+            rag=self.rag,
+            event_bus=self.bus,
+        )
 
-    assert parsed.intent_type == "workspace"
-    assert parsed.action == "undo"
-    assert parsed.bypass_llm is True
+    def tearDown(self) -> None:
+        self.scheduler.shutdown()
+        try:
+            self.tmp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_fast_path_never_calls_llm(self) -> None:
+        commands = [
+            "Hey E.V., set volume to 50%",
+            "mute audio",
+            "system status report",
+            "what time is it",
+            "unlock my phone",
+            "send an sms to Mom saying On my way",
+            "send a whatsapp message to Mom saying Hello",
+        ]
+        for cmd in commands:
+            match = self.router.route(cmd)
+            self.assertTrue(match.handled_by_fast_path, f"Failed fast-path for: {cmd}")
+        self.assertEqual(self.brain.calls, 0)
+
+    def test_compound_workspace_and_timed_call(self) -> None:
+        countdowns = []
+        self.bus.subscribe(Topics.COUNTDOWN_UPDATE, lambda e: countdowns.append(e.payload))
+        match = self.router.route(
+            "Hey E.V., open my coding workspace and prepare a call to Mom in 15 seconds"
+        )
+        self.assertEqual(match.intent_name, "compound_workspace_and_timed_call")
+        self.assertTrue(match.handled_by_fast_path)
+        self.assertEqual(match.slots["seconds"], 15)
+        self.assertEqual(self.brain.calls, 0)
+        time.sleep(0.1)
+        self.assertTrue(any(c["total"] == 15 and c["kind"] == "call" for c in countdowns))
+
+    def test_scheduler_schedule_cancel_and_run_now(self) -> None:
+        events = []
+        self.bus.subscribe(Topics.COUNTDOWN_UPDATE, lambda e: events.append(e.payload))
+
+        self.scheduler.schedule(seconds=10, label="Dim lights")
+        time.sleep(0.05)
+        self.assertTrue(self.scheduler.is_running)
+        self.assertTrue(self.scheduler.cancel(speak_feedback=False))
+        self.assertEqual(events[-1]["status"], "cancelled")
+
+        self.scheduler.schedule(seconds=20, label="Instant task", kind="notify")
+        time.sleep(0.05)
+        self.assertTrue(self.scheduler.run_now())
+        time.sleep(0.2)
+        self.assertEqual(events[-1]["status"], "completed")
+
+    def test_clap_detector_single_and_double_clap(self) -> None:
+        claps = []
+        self.bus.subscribe(Topics.VOICE_CLAP_DETECTED, lambda e: claps.append(e.payload))
+        detector = ClapDetector(self.config, event_bus=self.bus)
+
+        loud = struct.pack("<400h", *([25000, -25000] * 200))
+        quiet = struct.pack("<400h", *([40, -40] * 200))
+
+        self.assertFalse(detector.process_pcm_frame(loud))
+        detector.process_pcm_frame(quiet)
+        time.sleep(0.18)
+        self.assertTrue(detector.process_pcm_frame(loud))
+        self.assertEqual(len(claps), 1)
+        self.assertEqual(claps[0]["count"], 2)
+
+    def test_rag_memory_remember_recall_and_llm_context(self) -> None:
+        m1 = self.router.route("remember that my favorite editor is Neovim")
+        self.assertTrue(m1.handled_by_fast_path)
+
+        m2 = self.router.route("what do you remember about favorite editor?")
+        self.assertTrue(m2.handled_by_fast_path)
+        self.assertIn("Neovim", m2.response_text)
+
+        # Open-ended query should inject RAG memory into Brain.generate()
+        m3 = self.router.route("Why do developers enjoy using my favorite editor?")
+        self.assertFalse(m3.handled_by_fast_path)
+        self.assertEqual(self.brain.calls, 1)
+        self.assertIsNotNone(self.brain.last_context)
+        self.assertIn("Neovim", self.brain.last_context or "")
 
 
-def test_volume_control_intent() -> None:
-    router = IntentRouter()
-    p1 = router.route("mute audio")
-    assert p1.intent_name == "volume_control"
-    assert p1.handled_by_fast_path is True
-
-    p2 = router.route("set volume to 75%")
-    assert p2.intent_name == "volume_control"
-    assert p2.slots.get("level") == "75"
-
-
-def test_media_control_intent() -> None:
-    router = IntentRouter()
-    p1 = router.route("pause music")
-    assert p1.intent_name == "media_control"
-    assert p1.handled_by_fast_path is True
-
-    p2 = router.route("next track")
-    assert p2.intent_name == "media_control"
-    assert p2.handled_by_fast_path is True
-
-
-def test_system_status_intent() -> None:
-    router = IntentRouter()
-    parsed = router.route("system status")
-    assert parsed.intent_name == "system_status"
-    assert parsed.handled_by_fast_path is True
-
-
-def test_web_search_intent() -> None:
-    router = IntentRouter()
-    parsed = router.route("search python documentation")
-    assert parsed.intent_name == "web_search"
-    assert parsed.handled_by_fast_path is True
-
-
-def test_time_date_intent() -> None:
-    router = IntentRouter()
-    parsed = router.route("what time is it")
-    assert parsed.intent_name == "time_date"
-    assert parsed.handled_by_fast_path is True
-
-
-def test_chat_fallback() -> None:
-    router = IntentRouter()
-    parsed = router.route("Tell me a story about quantum computing.")
-
-    assert parsed.intent_type == "chat"
-    assert parsed.bypass_llm is False
-    assert parsed.handled_by_fast_path is False
+if __name__ == "__main__":
+    unittest.main()

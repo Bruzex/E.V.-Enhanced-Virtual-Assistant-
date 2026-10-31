@@ -1,104 +1,143 @@
-# E.V. (Enhanced Virtual Assistant) — v2.0.0
+# E.V. — Enhanced Virtual Assistant (v2.0)
 
-An autonomous, local-first virtual assistant inspired by Iron Man's JARVIS and Spider-Man ("Brand New Day"). Combines deep system control, multi-application workspace orchestration, phone/WhatsApp bridge, persistent long-term memory, and a cinematic dark holographic HUD — engineered specifically to run **100% offline and strictly CPU-bound under a ≤ 4.0 GB RAM budget** on the MSI Bravo 15 (AMD Radeon RX 6500M - 0 VRAM).
+**100% Offline • Strict CPU-Only (`n_gpu_layers=0`) • ≤ 4.0 GB Peak RAM • Dark Holographic HUD**
 
----
-
-## 🌌 Key Highlights
-
-- **Cinematic Dark Holographic HUD (PyQt6 / PyQt5 fallback)**:
-  - 48px/240px cyan grid, 70 floating ambient particles, CRT scanlines, animated sweep line, and vignette.
-  - Central **Status Orb** featuring 5 dynamic states (*Idle*, *Listening*, *Thinking*, *Speaking*, *Acting*), outer 90-tick rotation ring, segmented arc ring, interior hex lattice, and word-by-word streaming caption readout.
-  - Floating **Workspace Orchestrator** panel with live launch progress and one-click "Undo workspace" stack reversal.
-  - Timed Command **Countdown Dial** with large tabular seconds readout and urgent state shifting.
-  - Full-screen Iron-Man **Call Overlay** with rotating holographic rings, audio waveform bars, and VB-Audio voice routing.
-  - Floating **System Metrics Drawer** with 28-point sparklines, battery gauge, and `0 MB GPU` enforcement badge.
-- **Hardware & RAM Guard**:
-  - Automatically isolates AMD Radeon RX 6500M (`n_gpu_layers = 0`, GPU environment flags masked).
-  - Background `SystemBridge` polls process tree RSS memory and triggers emergency garbage collection if RAM exceeds 3.8 GB.
-- **Fast-Path Intent Router**:
-  - Intercepts workspace, call, volume, and timer commands before they touch the local LLM to achieve < 50ms latency and conserve RAM.
+E.V. (Enhanced Virtual Assistant) is a local-first, voice-driven desktop AI assistant inspired by Iron Man's JARVIS and the Jarvis AI Spark project, engineered specifically for constrained hardware (**MSI Bravo 15** with 16 GB RAM and AMD Radeon RX 6500M).
 
 ---
 
-## 📁 Project Architecture
+## 1. Hardware Constraints & Safety Architecture
 
-```
+| Constraint | Target Specification | Enforcement Mechanism in E.V. |
+| :--- | :--- | :--- |
+| **Target Laptop** | MSI Bravo 15 (16 GB RAM, AMD RX 6500M) | Windows-first paths, Win32 virtual media/volume keys, wireless ADB |
+| **GPU VRAM** | **0 MB VRAM** (`n_gpu_layers = 0`) | Hard-forced in `main.py`, `config.yaml`, and `core/brain.py`; clears `CUDA`/`HIP`/`ROCR`/`GGML_VK` env vars |
+| **Peak RAM** | **≤ 4.0 GB RSS** | Fast-path `IntentRouter` bypasses LLM for ~90% of commands; lazy LLM load + 300s idle unload + critical RAM unload at 3.8 GB |
+| **Local LLM** | `Qwen2.5-3B-Instruct Q4_K_M` (~2.1 GB) | `llama-cpp-python` CPU-only inference with `use_mmap: true` |
+| **Voice I/O** | `Vosk` STT (~50 MB) + `Piper` Neural TTS | Offline streaming recognition with automatic TTS echo-suppression gate |
+
+---
+
+## 2. Project Structure
+
+```text
 ev/
-├── main.py                     # Primary entry point & SystemBridge telemetry loop
-├── config.yaml                 # Master configuration (hardware, LLM, voice, GUI)
-├── requirements.txt            # Python 3.10+ dependencies
+├── main.py                      # Entry point, SystemBridge, logs/rss.log telemetry
+├── config.yaml                  # Master configuration (strict n_gpu_layers: 0)
+├── requirements.txt             # Python 3.10+ dependencies
+├── README.md                    # Documentation & setup guide
 ├── core/
-│   ├── event_bus.py            # Thread-safe pub/sub between background workers & HUD
-│   ├── brain.py                # CPU-only llama.cpp engine (Qwen2.5-3B-Instruct)
-│   ├── intent_router.py        # Fast-path keyword & regex command classifier
-│   └── scheduler.py            # Second-precision delayed command execution
+│   ├── brain.py                 # llama-cpp-python wrapper (CPU-only, lazy load/unload)
+│   ├── intent_router.py         # Fast regex/keyword router + compound command splitter
+│   ├── scheduler.py             # Non-blocking 1 Hz TimedCommandScheduler
+│   └── event_bus.py             # Thread-safe pub/sub EventBus & Topics constants
 ├── voice/
-│   ├── stt.py                  # Offline Vosk speech-to-text
-│   ├── tts.py                  # Offline Piper neural text-to-speech
-│   ├── wakeword.py             # Offline "Hey E.V." trigger detection
-│   └── clap_detector.py        # Double-clap acoustic energy detector
+│   ├── stt.py                   # Offline Vosk STT wrapper + TTS echo suppression
+│   ├── tts.py                   # Non-blocking Piper neural TTS worker queue
+│   ├── wakeword.py              # RMS energy gate + "Hey E.V." wake-word loop
+│   └── clap_detector.py         # Percussive double-clap detector on raw PCM stream
 ├── automation/
-│   ├── system.py               # Process monitoring, app launch, screenshot capture
-│   ├── workspace.py            # Multi-app workspace launcher & undo stack
-│   ├── media.py                # System media playback & volume control
-│   └── web_search.py           # Zero-API DuckDuckGo search queries
+│   ├── system.py                # App launch/close, folders/URLs, volume/mute, psutil
+│   ├── workspace.py             # JSON Workspace Orchestrator + LIFO Undo stack
+│   ├── media.py                 # Media playback keys, Win+D desktop, screenshots
+│   └── web_search.py            # Zero-API-key live search via duckduckgo-search
 ├── remote/
-│   ├── whatsapp.py             # WhatsApp Web Selenium controller
-│   ├── phone_adb.py            # Wireless ADB bridge (call, unlock, SMS, apps)
-│   └── audio_routing.py        # VB-Audio Virtual Cable call voice injection
+│   ├── phone_adb.py             # Wireless & USB Android ADB bridge (call, SMS, unlock)
+│   ├── whatsapp.py              # Lazy-loaded persistent-profile Selenium WhatsApp Web
+│   └── audio_routing.py         # VB-Audio Virtual Cable call voice injection
 ├── memory/
-│   ├── sqlite_store.py         # Relational SQLite message & preferences database
-│   ├── chroma_store.py         # Persistent ChromaDB vector embedding store
-│   └── rag.py                  # Context retrieval for LLM augmentation
+│   ├── sqlite_store.py          # WAL-mode SQLite store for preferences & history
+│   ├── chroma_store.py          # Persistent vector memory with zero-RAM hashing embedder
+│   └── rag.py                   # Unified RAG context builder & fact recall
 ├── gui/
-│   ├── main_window.py          # Complete PyQt Holographic HUD implementation
-│   ├── status_orb.py           # Animated central Status Orb widget
-│   ├── overlays.py             # GlassPanel, Countdown, Workspace, Call modals
-│   ├── styles.qss              # Dark holographic styling tokens
-│   └── assets/                 # Pre-cached icons, audio cues, visuals
+│   ├── main_window.py           # Thin HUD orchestrator window
+│   ├── status_orb.py            # 5-state animated StatusOrbWidget & theme primitives
+│   ├── overlays.py              # Workspace, Countdown, Call, Metrics & Settings panels
+│   └── styles.qss               # Dark holographic stylesheet (#0B0F19 / #00D4FF / #7B61FF)
 ├── data/
 │   └── workspaces/
-│       └── coding.json         # 10-item developer workspace configuration
-├── models/                     # GGUF, Vosk, and Piper models (git-ignored)
-└── tests/                      # Automated pytest unit test suite
+│       └── coding.json          # Default 10-item Coding workspace definition
+├── models/                      # Place local GGUF, Vosk, and Piper models here
+└── tests/
+    ├── test_intent_router.py
+    ├── test_workspace.py
+    └── test_phone_adb.py
 ```
 
 ---
 
-## 🚀 Getting Started
+## 3. Model Placement (`models/`)
 
-### 1. Prerequisites
-- Python 3.10+ (64-bit)
-- Windows 10/11 (or Linux)
+Download and place the following offline models inside `ev/models/`:
 
-### 2. Setup Virtual Environment
+1. **LLM (`Qwen2.5-3B-Instruct Q4_K_M`)**:
+   - Path: `ev/models/qwen2.5-3b-instruct-q4_k_m.gguf`
+2. **Vosk STT (`vosk-model-small-en-us`)**:
+   - Extract to: `ev/models/vosk-model-small-en-us/`
+3. **Piper TTS (`en_US-lessac-medium`)**:
+   - Path: `ev/models/piper/en_US-lessac-medium.onnx`
+   - Config: `ev/models/piper/en_US-lessac-medium.onnx.json`
+
+*(Note: E.V. degrades gracefully if any model file is not yet present—the HUD, Workspace Orchestrator, Timed Command Scheduler, and deterministic voice/button flows remain 100% functional.)*
+
+---
+
+## 4. Installation & Running E.V.
+
 ```bash
+# 1. Create and activate virtual environment (Python 3.10+)
 python -m venv .venv
-# On Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
-# On Linux/macOS:
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
 source .venv/bin/activate
 
+# 2. Install dependencies (CPU-only llama-cpp-python)
 pip install -r requirements.txt
-```
 
-### 3. Launching E.V.
-```bash
-# Standard HUD launch:
+# 3. Launch the E.V. Holographic HUD
 python main.py
 
-# Low CPU overhead mode (disables particles and scanlines):
-python main.py --minimal-ui
+# Optional flags:
+python main.py --minimal-ui   # Disable particles/scanlines for ultra-low CPU usage
+python main.py --fullscreen   # Launch HUD in fullscreen mode
+```
 
-# Fullscreen holographic display:
-python main.py --fullscreen
+To watch live RAM and CPU telemetry in a terminal (matching the `RAM monitor` item in `coding.json`):
+
+```bash
+tail -f logs/rss.log
 ```
 
 ---
 
-## 🧪 Running Tests
-```bash
-pytest
-```
+## 5. Key Voice Commands
 
+- **Success Benchmark Scenario (Compound Command)**:
+  - *"Hey E.V., open my coding workspace and prepare a call to Mom in 30 seconds."*
+- **Workspaces**:
+  - *"Hey E.V., launch my coding workspace."*
+  - *"Hey E.V., undo my coding workspace."*
+- **Timed Commands & Countdown**:
+  - *"Hey E.V., in 10 seconds dim desk lights to 30%."*
+  - *"Hey E.V., cancel timer."* / *"Hey E.V., run timer now."*
+- **Phone Control (Wireless ADB) & WhatsApp**:
+  - *"Hey E.V., unlock my phone."*
+  - *"Hey E.V., call Mom."*
+  - *"Hey E.V., send an SMS to Mom saying I'll be home at 8."*
+  - *"Hey E.V., send a WhatsApp voice note to Mom saying I'm wrapping up my sprint."*
+- **System, Media & Memory**:
+  - *"Hey E.V., system status report."*
+  - *"Hey E.V., set volume to 40%."* / *"Hey E.V., mute audio."*
+  - *"Hey E.V., remember that my project deadline is November 15."*
+  - *"Hey E.V., what do you remember about project deadline?"*
+- **Non-Voice Trigger**:
+  - **Double-clap** near the microphone to toggle active listening.
+
+---
+
+## 6. Running the Test Suite
+
+```bash
+python -m unittest discover -s tests -v
+```

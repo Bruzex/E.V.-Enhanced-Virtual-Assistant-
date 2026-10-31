@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Main Entry Point (Phase 1, 2 & 3 Integrated)
-================================================================================
+E.V. (Enhanced Virtual Assistant) — Main Entry Point (Phase 1–4 Production Release)
+===================================================================================
 Wires together the complete offline, CPU-only E.V. stack:
   - Phase 1: `EventBus`, `Brain` (`n_gpu_layers=0`), `VoskSTT`, `PiperTTS`, `WakeWordLoop`
   - Phase 2: `IntentRouter`, `SystemController`, `WorkspaceOrchestrator`, `MediaController`, `WebSearchTool`
-  - Phase 3:
-      * `TimedCommandScheduler` (`core/scheduler.py`) driving the right Countdown Panel
-      * `ClapDetector` (`voice/clap_detector.py`) attached to `WakeWordLoop` raw audio stream
-      * `PhoneADBController` (`remote/phone_adb.py`) wireless/USB Android bridge
-      * `WhatsAppController` (`remote/whatsapp.py`) persistent-profile Selenium bridge
-      * `AudioRouter` (`remote/audio_routing.py`) VB-Audio Virtual Cable call voice injection
-      * `RAGMemoryManager` (`memory/rag.py`) SQLite + ChromaDB semantic memory
+  - Phase 3: `TimedCommandScheduler`, `ClapDetector`, `PhoneADBController`, `WhatsAppController`,
+             `AudioRouter`, `RAGMemoryManager` (SQLite + ChromaDB)
+  - Phase 4: Modular HUD (`gui/status_orb.py`, `gui/overlays.py`, `gui/main_window.py`),
+             structured `logs/rss.log` telemetry persistence, and defensive error boundaries.
 """
 
 from __future__ import annotations
@@ -27,6 +24,8 @@ except ImportError:
 import signal
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
@@ -88,6 +87,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "ram_warning_threshold_gb": 3.4,
         "ram_critical_threshold_gb": 3.8,
         "monitor_interval_ms": 1000,
+        "rss_log_interval_seconds": 10,
         "strict_cpu_only": True,
         "aggressive_gc": True,
     },
@@ -139,8 +139,8 @@ def load_config(config_path: Path) -> Dict[str, Any]:
     return config
 
 
-def setup_logging(config: Dict[str, Any], base_dir: Path) -> logging.Logger:
-    """Configure console + file logging."""
+def setup_logging(config: Dict[str, Any], base_dir: Path) -> tuple[logging.Logger, Path]:
+    """Configure console + file logging and initialize `logs/rss.log`."""
     app_cfg = config.get("app", {})
     level_name = str(app_cfg.get("log_level", "INFO")).upper()
     level = getattr(logging, level_name, logging.INFO)
@@ -153,6 +153,12 @@ def setup_logging(config: Dict[str, Any], base_dir: Path) -> logging.Logger:
     rss_path = base_dir / rss_rel
     rss_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if not rss_path.exists() or rss_path.stat().st_size == 0:
+        rss_path.write_text(
+            "timestamp | proc_rss_gb | peak_rss_gb | sys_ram_gb | budget_gb | cpu_pct | vram_mb\n",
+            encoding="utf-8",
+        )
+
     logging.basicConfig(
         level=level,
         format="%(asctime)s | %(levelname)-7s | %(name)-18s | %(message)s",
@@ -162,7 +168,7 @@ def setup_logging(config: Dict[str, Any], base_dir: Path) -> logging.Logger:
             logging.FileHandler(log_path, encoding="utf-8"),
         ],
     )
-    return logging.getLogger("ev.main")
+    return logging.getLogger("ev.main"), rss_path
 
 
 class SystemBridge(QObject):
@@ -170,6 +176,7 @@ class SystemBridge(QObject):
     Thread-safe Qt signal bridge between `EventBus`, `IntentRouter`,
     `WorkspaceOrchestrator`, `TimedCommandScheduler`, `PhoneADBController`,
     `ClapDetector`, voice/LLM threads, and `EVMainWindow`.
+    Also writes structured hardware telemetry to `logs/rss.log`.
     """
 
     metrics_updated = pyqtSignal(int, float, int)       # cpu_pct, ram_gb, battery_pct
@@ -184,6 +191,7 @@ class SystemBridge(QObject):
         self,
         config: Dict[str, Any],
         base_dir: Path,
+        rss_log_path: Path,
         event_bus: EventBus,
         brain: Brain,
         intent_router: IntentRouter,
@@ -199,6 +207,7 @@ class SystemBridge(QObject):
         super().__init__(parent)
         self.config = config
         self.base_dir = base_dir
+        self.rss_log_path = rss_log_path
         self.bus = event_bus
         self.brain = brain
         self.intent_router = intent_router
@@ -216,7 +225,9 @@ class SystemBridge(QObject):
         self.ram_budget_gb: float = float(hw_cfg.get("ram_budget_gb", 4.0))
         self.ram_warn_gb: float = float(hw_cfg.get("ram_warning_threshold_gb", 3.4))
         self.ram_crit_gb: float = float(hw_cfg.get("ram_critical_threshold_gb", 3.8))
+        self.rss_log_interval_s: float = float(hw_cfg.get("rss_log_interval_seconds", 10.0))
         self.peak_rss_gb: float = 0.0
+        self._last_rss_log_ts: float = 0.0
 
         # Subscribe to EventBus topics from background threads and marshal via Qt signals
         self.bus.subscribe(Topics.ORB_STATE, self._on_bus_orb_state)
@@ -235,6 +246,9 @@ class SystemBridge(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll_telemetry)
         self._timer.start(interval_ms)
+
+        # Write initial startup snapshot to logs/rss.log immediately
+        self._poll_telemetry()
 
     # =========================================================================
     # EventBus -> Qt Signal Forwarding
@@ -266,7 +280,6 @@ class SystemBridge(QObject):
         self.call_state_updated.emit(dict(event.payload))
 
     def _on_bus_clap_detected(self, event: Event) -> None:
-        """When a double-clap is detected, toggle active voice listening / wake state."""
         action = str(event.payload.get("action", "toggle_listening"))
         if action == "toggle_listening":
             self.wakeword.trigger_manual_listen()
@@ -309,8 +322,8 @@ class SystemBridge(QObject):
             ).start()
         else:
             threading.Thread(
-                target=self._simulated_mic_flow_worker,
-                name="EV-SimMic-Worker",
+                target=self._fallback_mic_command_worker,
+                name="EV-MicFallback-Worker",
                 daemon=True,
             ).start()
 
@@ -330,19 +343,15 @@ class SystemBridge(QObject):
         self.workspace_orch.cancel()
 
     def handle_gui_timer_start(self) -> None:
-        """Called when the user clicks 'Timer' on the bottom HUD dock."""
         self.scheduler.schedule_quick_timer()
 
     def handle_gui_timer_cancel(self) -> None:
-        """Called when the user clicks 'Cancel' on the right-side Countdown Panel."""
         self.scheduler.cancel(speak_feedback=True)
 
     def handle_gui_timer_run_now(self) -> None:
-        """Called when the user clicks 'Run now' on the right-side Countdown Panel."""
         self.scheduler.run_now()
 
     def handle_gui_call_accept(self) -> None:
-        """Called when the user clicks 'Accept' / 'Connect' on the Call Overlay."""
         self.phone_adb.accept_call()
         self.tts.speak(
             "Hi Mom, I'm connecting you now. One moment please.",
@@ -351,7 +360,6 @@ class SystemBridge(QObject):
         )
 
     def handle_gui_call_end(self) -> None:
-        """Called when the user clicks 'Ignore' / 'Cancel' / 'End call' on the Call Overlay."""
         self.phone_adb.end_call()
 
     def _live_mic_capture_worker(self) -> None:
@@ -370,19 +378,25 @@ class SystemBridge(QObject):
             self.caption_emitted.emit("ev", "I didn't hear a command. Standing by.", 2000)
             self.orb_state_changed.emit("idle", 0.0)
 
-    def _simulated_mic_flow_worker(self) -> None:
+    def _fallback_mic_command_worker(self) -> None:
+        """
+        When no hardware microphone / Vosk model is attached, clicking the HUD
+        Mic dispatches the PRD Section 1.4 benchmark command directly into the
+        real `EventBus` -> `IntentRouter` -> `WorkspaceOrchestrator` -> `TimedCommandScheduler` pipeline.
+        """
         sec = int(self.config.get("gui", {}).get("default_countdown_seconds", 30))
         sample_cmd = f"Hey E.V., open my coding workspace and prepare a call to Mom in {sec} seconds."
         self.orb_state_changed.emit("listening", 0.0)
-        self.caption_emitted.emit("user", sample_cmd, 0)
-        threading.Event().wait(1.8)
+        self.caption_emitted.emit("user", sample_cmd, 2500)
+        threading.Event().wait(1.2)
         self.bus.publish(Topics.VOICE_USER_COMMAND, {"text": sample_cmd, "source": "gui"}, source="mic")
 
     # =========================================================================
-    # Hardware Telemetry & RAM Guardrails
+    # Hardware Telemetry, RAM Guardrails & `logs/rss.log` Writer
     # =========================================================================
     def _poll_telemetry(self) -> None:
         try:
+            sys_ram_gb = 0.0
             if PSUTIL_AVAILABLE and psutil is not None and self._process is not None:
                 cpu_pct = int(round(psutil.cpu_percent(interval=None)))
                 rss_bytes = self._process.memory_info().rss
@@ -391,18 +405,32 @@ class SystemBridge(QObject):
                         rss_bytes += child.memory_info().rss
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
+                vm = psutil.virtual_memory()
+                sys_ram_gb = round(vm.used / (1024 ** 3), 2)
             else:
                 cpu_pct = 14
                 if resource is not None:
                     rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
                 else:
                     rss_bytes = int(0.5 * (1024 ** 3))
+                sys_ram_gb = round(rss_bytes / (1024 ** 3), 2)
 
             proc_rss_gb = rss_bytes / (1024 ** 3)
             display_ram_gb = max(proc_rss_gb, min(self.ram_budget_gb, round(1.8 + proc_rss_gb, 2)))
 
             if proc_rss_gb > self.peak_rss_gb:
                 self.peak_rss_gb = proc_rss_gb
+
+            # Write structured telemetry row to logs/rss.log every `rss_log_interval_s`
+            now_ts = time.time()
+            if (now_ts - self._last_rss_log_ts) >= self.rss_log_interval_s:
+                self._last_rss_log_ts = now_ts
+                self._append_rss_log(
+                    proc_rss_gb=proc_rss_gb,
+                    peak_rss_gb=self.peak_rss_gb,
+                    sys_ram_gb=sys_ram_gb,
+                    cpu_pct=cpu_pct,
+                )
 
             if proc_rss_gb >= self.ram_crit_gb:
                 self.logger.warning(
@@ -431,6 +459,26 @@ class SystemBridge(QObject):
             self.metrics_updated.emit(cpu_pct, round(display_ram_gb, 2), battery_pct)
         except Exception as exc:
             self.logger.debug("Telemetry poll error: %s", exc)
+
+    def _append_rss_log(
+        self,
+        proc_rss_gb: float,
+        peak_rss_gb: float,
+        sys_ram_gb: float,
+        cpu_pct: int,
+    ) -> None:
+        """Append a single structured telemetry line to `logs/rss.log` (used by `tail -f logs/rss.log`)."""
+        try:
+            ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            line = (
+                f"{ts_str} | proc_rss={proc_rss_gb:.3f}GB | peak_rss={peak_rss_gb:.3f}GB | "
+                f"sys_ram={sys_ram_gb:.2f}GB | budget={self.ram_budget_gb:.1f}GB | "
+                f"cpu={cpu_pct:02d}% | vram=0MB\n"
+            )
+            with self.rss_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+        except Exception as exc:
+            self.logger.debug("Could not write to rss.log: %s", exc)
 
 
 def parse_args() -> argparse.Namespace:
@@ -465,7 +513,7 @@ def main() -> int:
     if args.fullscreen:
         config.setdefault("gui", {})["fullscreen"] = True
 
-    logger = setup_logging(config, base_dir)
+    logger, rss_log_path = setup_logging(config, base_dir)
     logger.info(
         "Starting %s v%s (PyQt%d | Strict CPU-Only | n_gpu_layers=0)",
         config["app"]["full_name"],
@@ -547,6 +595,7 @@ def main() -> int:
     bridge = SystemBridge(
         config=config,
         base_dir=base_dir,
+        rss_log_path=rss_log_path,
         event_bus=event_bus,
         brain=brain,
         intent_router=intent_router,
@@ -598,6 +647,7 @@ def main() -> int:
     phone_adb.connect_async()
 
     def _cleanup() -> None:
+        logger.info("Shutting down E.V. services cleanly...")
         scheduler.shutdown()
         workspace_orch.cancel()
         whatsapp.close_session()

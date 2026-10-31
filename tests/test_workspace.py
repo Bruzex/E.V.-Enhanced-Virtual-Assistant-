@@ -1,46 +1,78 @@
+#!/usr/bin/env python3
 """
-Unit Tests for E.V. Workspace Orchestrator
-==========================================
-Validates JSON loading, execution structure, and LIFO undo tracking.
+Unit tests for `automation/workspace.py` (`WorkspaceOrchestrator` sequential +
+parallel launch, real-time `Topics.WORKSPACE_PROGRESS` events, and LIFO Undo).
 """
 
+from __future__ import annotations
+
+import json
+import tempfile
+import time
+import unittest
 from pathlib import Path
+
+from automation.system import SystemController
 from automation.workspace import WorkspaceOrchestrator
+from core.event_bus import EventBus, Topics
 
 
-def test_load_coding_workspace() -> None:
-    base_dir = Path(__file__).resolve().parent.parent
-    orchestrator = WorkspaceOrchestrator(base_dir=base_dir)
+class TestWorkspaceOrchestrator(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.base_dir = Path(self.tmp_dir.name)
+        ws_dir = self.base_dir / "data" / "workspaces"
+        ws_dir.mkdir(parents=True, exist_ok=True)
 
-    ws = orchestrator.load_workspace("coding")
-    assert ws is not None
-    assert ws["name"] == "Coding workspace"
-    assert len(ws["items"]) >= 10
-
-    kinds = {item["kind"] for item in ws["items"]}
-    assert "app" in kinds
-    assert "folder" in kinds
-    assert "url" in kinds
-    assert "terminal" in kinds
-
-
-def test_workspace_orchestration_and_undo_tracking() -> None:
-    base_dir = Path(__file__).resolve().parent.parent
-    config = {
-        "automation": {
-            "default_workspace": "coding",
-            "execute_os_actions": False,
-            "sequential_delay_ms": 10,
-            "undo_delay_ms": 10,
+        ws_data = {
+            "name": "Coding workspace",
+            "slug": "coding",
+            "items": [
+                {"id": "vscode", "name": "VS Code", "detail": "~/Projects/ev", "kind": "app", "target": "code"},
+                {"id": "projects", "name": "Projects folder", "detail": "~/Projects", "kind": "folder", "target": "~/Projects", "parallel_group": "g1"},
+                {"id": "github", "name": "GitHub", "detail": "github.com", "kind": "url", "target": "https://github.com", "parallel_group": "g1"},
+                {"id": "logs", "name": "RAM monitor", "detail": "tail -f logs/rss.log", "kind": "terminal", "target": "tail -f logs/rss.log"},
+            ],
         }
-    }
-    orchestrator = WorkspaceOrchestrator(config=config, base_dir=base_dir)
+        (ws_dir / "coding.json").write_text(json.dumps(ws_data), encoding="utf-8")
 
-    ok, msg = orchestrator.launch_workspace("coding")
-    assert ok is True
-    assert "launching" in msg.lower() or "ready" in msg.lower() or "launched" in msg.lower()
+        self.config = {
+            "automation": {
+                "workspaces_dir": "data/workspaces",
+                "default_workspace": "coding",
+                "sequential_delay_ms": 20,
+                "undo_delay_ms": 15,
+                "max_parallel_group": 2,
+                "execute_os_actions": False,
+            }
+        }
+        self.bus = EventBus()
+        self.sys_ctrl = SystemController(self.config, self.base_dir)
+        self.orch = WorkspaceOrchestrator(self.config, self.base_dir, self.sys_ctrl, self.bus)
 
-    # Verify LIFO Undo stack can reverse the workspace
-    undo_ok, undo_msg = orchestrator.undo_last_workspace()
-    assert undo_ok is True
-    assert "closed" in undo_msg.lower() or "restored" in undo_msg.lower() or "reversing" in undo_msg.lower()
+    def tearDown(self) -> None:
+        self.orch.cancel()
+        try:
+            self.tmp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_launch_and_lifo_undo(self) -> None:
+        progress_events = []
+        self.bus.subscribe(Topics.WORKSPACE_PROGRESS, lambda e: progress_events.append(e.payload))
+
+        ok, msg = self.orch.launch_workspace("coding")
+        self.assertTrue(ok)
+        time.sleep(0.3)
+
+        self.assertTrue(any(e["status"] == "done" and e["completed"] == 4 for e in progress_events))
+
+        ok_undo, _ = self.orch.undo_last_workspace()
+        self.assertTrue(ok_undo)
+        time.sleep(0.25)
+
+        self.assertTrue(any(e["status"] == "undone" and e["completed"] == 0 for e in progress_events))
+
+
+if __name__ == "__main__":
+    unittest.main()
