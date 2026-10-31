@@ -74,5 +74,17 @@ class TestWorkspaceOrchestrator(unittest.TestCase):
         self.assertTrue(any(e["status"] == "undone" and e["completed"] == 0 for e in progress_events))
 
 
+    def test_selective_workspace_launch(self) -> None:
+        progress_events = []
+        self.bus.subscribe(Topics.WORKSPACE_PROGRESS, lambda e: progress_events.append(e.payload))
+
+        ok, msg = self.orch.launch_workspace("coding", item_filter=["VS Code", "GitHub"])
+        self.assertTrue(ok)
+        self.assertIn("2 items", msg)
+        time.sleep(0.2)
+
+        self.assertTrue(any(e["status"] == "done" and e["completed"] == 2 for e in progress_events))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -263,7 +263,7 @@ class SystemController:
         if self.is_windows:
             exe_name = target if target.endswith(".exe") else f"{target}.exe"
             subprocess.run(
-                ["taskkill", "/IM", exe_name, "/F"],
+                ["taskkill", "/F", "/T", "/IM", exe_name],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,

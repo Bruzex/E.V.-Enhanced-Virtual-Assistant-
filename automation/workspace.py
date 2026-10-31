@@ -152,13 +152,43 @@ class WorkspaceOrchestrator:
         with self._lock:
             return self._is_busy
 
+    def _filter_items(self, items: List[Dict[str, Any]], filter_tokens: List[str]) -> List[Dict[str, Any]]:
+        """Filter workspace items by name, id, target, or category keywords."""
+        if not filter_tokens:
+            return items
+        norm_tokens = [t.strip().lower() for t in filter_tokens if t.strip()]
+        matched = []
+        for item in items:
+            name_l = item.get("name", "").lower()
+            id_l = item.get("id", "").lower()
+            kind_l = item.get("kind", "").lower()
+            target_l = str(item.get("target", "")).lower()
+            detail_l = str(item.get("detail", "")).lower()
+
+            for tok in norm_tokens:
+                if (
+                    tok in name_l
+                    or tok in id_l
+                    or tok in target_l
+                    or tok in detail_l
+                    or (tok in ("browser", "web", "chrome", "edge", "internet") and (kind_l == "url" or "http" in target_l or "chrome" in target_l))
+                    or (tok in ("code", "editor", "vscode", "vs code") and ("code" in id_l or "code" in target_l or "code" in name_l))
+                    or (tok in ("terminal", "cmd", "shell", "powershell", "monitor") and (kind_l == "terminal" or "log" in id_l or "tail" in target_l))
+                    or (tok in ("folder", "directory", "dir", "files", "project", "projects") and (kind_l == "folder" or "project" in id_l))
+                ):
+                    matched.append(item)
+                    break
+        return matched if matched else items
+
     def launch_workspace(
         self,
         name_or_slug: Optional[str] = None,
         on_complete: Optional[Callable[[], None]] = None,
+        item_filter: Optional[List[str]] = None,
     ) -> Tuple[bool, str]:
         """
         Start launching a workspace asynchronously on a background worker thread.
+        Supports selective filtering of workspace items via `item_filter`.
         Publishes real-time `Topics.WORKSPACE_PROGRESS` events after every item.
         """
         with self._lock:
@@ -174,6 +204,12 @@ class WorkspaceOrchestrator:
 
         ws_name = ws_def["name"]
         items = ws_def["items"]
+        if item_filter:
+            filtered = self._filter_items(items, item_filter)
+            if filtered:
+                ws_def = dict(ws_def)
+                ws_def["items"] = filtered
+                items = filtered
 
         self._active_thread = threading.Thread(
             target=self._run_launch_worker,
@@ -378,11 +414,34 @@ class WorkspaceOrchestrator:
         )
 
     def _reverse_single_item(self, rec: LaunchedItemRecord) -> None:
+        """More aggressive process termination for Undo."""
         if rec.pid is not None:
             self.system_ctrl.terminate_pid(rec.pid)
-        elif rec.kind == "app" and self.execute_os_actions:
-            # Best-effort termination by process name if PID wasn't captured
-            self.system_ctrl.close_application(rec.name)
+
+        if not self.execute_os_actions:
+            return
+
+        # Always try by name as well (many apps spawn child processes)
+        name_to_kill = rec.name.lower()
+        kill_map = {
+            "vs code": "Code.exe",
+            "vscode": "Code.exe",
+            "visual studio code": "Code.exe",
+            "chrome": "chrome.exe",
+            "google chrome": "chrome.exe",
+            "brave": "brave.exe",
+            "edge": "msedge.exe",
+            "microsoft edge": "msedge.exe",
+            "spotify": "Spotify.exe",
+            "notion": "Notion.exe",
+            "docker desktop": "Docker Desktop.exe",
+            "terminal": "WindowsTerminal.exe",
+            "windows terminal": "WindowsTerminal.exe",
+            "powershell": "powershell.exe",
+            "ram monitor": "powershell.exe",
+        }
+        target = kill_map.get(name_to_kill, rec.name)
+        self.system_ctrl.close_application(target)
 
     def _publish_progress(
         self,

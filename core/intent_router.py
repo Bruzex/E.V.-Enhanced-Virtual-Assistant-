@@ -338,6 +338,18 @@ class IntentRouter:
             description="Reverse the last launched workspace and close spawned items",
         )
 
+        # 14: Selective Workspace Launch ("open only VS Code and browser from my coding workspace")
+        self.register(
+            name="workspace_selective_launch",
+            priority=14,
+            patterns=[
+                r"\b(?:open|launch|start)\s+only\s+(?P<items>.+?)\s+from\s+(?:my\s+|the\s+)?(?P<ws>[a-z0-9_-]+)\s+workspace\b",
+                r"\bfrom\s+(?:my\s+|the\s+)?(?P<ws>[a-z0-9_-]+)\s+workspace\s+(?:open|launch|start)\s+only\s+(?P<items>.+)\b",
+            ],
+            handler=self._handle_workspace_selective_launch,
+            description="Launch only selected applications from a saved workspace",
+        )
+
         # 15: Workspace Launch
         self.register(
             name="workspace_launch",
@@ -392,15 +404,29 @@ class IntentRouter:
             description="Control Android phone over Wireless/USB ADB",
         )
 
-        # 25: Phone Call Intent
+        # 26: Call by dynamic contact name
         self.register(
-            name="phone_call",
-            priority=25,
+            name="call_contact",
+            priority=26,
             patterns=[
-                r"\b(?:make\s+a\s+call\s+to|prepare\s+a\s+call\s+to|call|dial|phone)\s+(?P<contact>[a-z0-9\s]+)$",
+                r"\b(?:make\s+a\s+call\s+to|prepare\s+a\s+call\s+to|call|dial|phone|ring)\s+(?P<name>[a-z0-9\s]+)$",
             ],
-            handler=self._handle_phone_call,
-            description="Initiate or prepare a phone call via wireless ADB bridge",
+            handler=self._handle_call_contact,
+            description="Call a contact by name using number stored in memory",
+        )
+
+        # 27: Save / Update Contact Number
+        self.register(
+            name="save_contact",
+            priority=27,
+            patterns=[
+                r"\bremember\s+that\s+(?P<name>[a-z0-9\s]+?)(?:'s)?\s+(?:phone\s+)?number\s+is\s+(?P<number>[\d\s\+\-\(\)]+)",
+                r"\bupdate\s+(?P<name>[a-z0-9\s]+?)(?:'s)?\s+(?:phone\s+)?number\s+to\s+(?P<number>[\d\s\+\-\(\)]+)",
+                r"\b(?:my\s+)?(?P<name>[a-z0-9\s]+?)(?:'s)?\s+number\s+is\s+(?P<number>[\d\s\+\-\(\)]+)[,.]?\s*(?:save\s+it\s+as\s+(?P<alias>[a-z0-9\s]+))?",
+                r"\bsave\s+(?P<name>[a-z0-9\s]+)\s+(?:as\s+)?(?:contact\s+)?(?:with\s+)?(?:number\s+)?(?P<number>[\d\s\+\-\(\)]+)",
+            ],
+            handler=self._handle_save_contact,
+            description="Save or update a contact's phone number in long-term memory",
         )
 
         # 28: Memory Store & Recall ("remember that X is Y", "what do you remember about X")
@@ -632,24 +658,85 @@ class IntentRouter:
             return msg
         return f"Sent SMS to {contact}: {sms_body}"
 
-    def _handle_phone_call(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
-        contact = (match.groupdict().get("contact") or "Mom").strip().title()
-        if self.phone_adb is not None:
-            _, msg = self.phone_adb.make_call(contact)
+    def _handle_workspace_selective_launch(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
+        gd = match.groupdict()
+        ws_name = (gd.get("ws") or "coding").strip().lower()
+        raw_items = gd.get("items") or ""
+        tokens = [tok.strip() for tok in re.split(r",|\band\b|\+", raw_items) if tok.strip()]
+        if not tokens:
+            tokens = [raw_items.strip()]
+
+        if self.workspace_orch is not None:
+            ok, msg = self.workspace_orch.launch_workspace(ws_name, item_filter=tokens)
             return msg
+        return f"Selective launch from {ws_name} workspace requested for {', '.join(tokens)}."
+
+    def _handle_save_contact(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
+        gd = match.groupdict()
+        name = (gd.get("name") or gd.get("alias") or "contact").strip().title()
+        number = re.sub(r"[^\d+]", "", gd.get("number") or "")
+
+        if not number or len(number) < 8:
+            return "I need a valid phone number to save."
+
+        # Save in both structured memory and vector memory
+        key = f"contact_{name.lower().replace(' ', '_')}"
+        if self.rag is not None:
+            self.rag.remember_fact(key, number, category="contact")
+            # Also store a human readable version
+            self.rag.remember_fact(f"{name}'s phone number", number, category="contact")
+
+        return f"Got it. I've saved {name}'s number as {number}."
+
+    def _handle_call_contact(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
+        gd = match.groupdict()
+        name = (gd.get("name") or gd.get("contact") or "").strip().title()
+        if not name:
+            return "Who would you like me to call?"
+
+        number = None
+        if self.rag is not None:
+            # Try several possible keys in SQLite memory
+            for key in [
+                f"contact_{name.lower().replace(' ', '_')}",
+                f"{name}'s phone number",
+                f"{name.lower()} number",
+                name.lower(),
+            ]:
+                number = self.rag.sqlite.get_preference(key)
+                if number:
+                    break
+
+        # Fallback: check configured contacts in phone_adb (e.g. Mom from config)
+        if not number and self.phone_adb is not None:
+            if name.lower() in self.phone_adb.contacts:
+                info = self.phone_adb.contacts[name.lower()]
+                number = info.get("number")
+
+        if not number:
+            return f"I don't have a phone number saved for {name} yet. You can say: remember that {name}'s number is ..."
+
+        # Now actually place the call
+        if self.phone_adb is not None:
+            _, msg = self.phone_adb.make_call(number, contact_name=name)
+            return msg
+
+        # Fallback: just show the call overlay
         self.bus.publish(
             Topics.CALL_STATE,
             {
                 "action": "start",
                 "direction": "outgoing",
                 "status": "ringing",
-                "name": contact,
-                "number": "+1 (555) 014-2290",
+                "name": name,
+                "number": number,
                 "meta": "Mobile · via phone bridge",
             },
             source="intent_router",
         )
-        return f"Your call to {contact} is ready."
+        return f"Calling {name} at {number}."
+
+    _handle_phone_call = _handle_call_contact
 
     def _handle_memory(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()

@@ -161,5 +161,33 @@ class TestIntentRouterAndPhase3(unittest.TestCase):
         self.assertIn("Neovim", self.brain.last_context or "")
 
 
+    def test_dynamic_contacts_save_and_call(self) -> None:
+        call_events = []
+        self.bus.subscribe(Topics.CALL_STATE, lambda e: call_events.append(e.payload))
+
+        # 1. Save new contact
+        res_save = self.router.route("remember that John's phone number is +1 (555) 019-9988")
+        self.assertEqual(res_save.intent_name, "save_contact")
+        self.assertIn("John", res_save.response_text)
+        self.assertIn("+15550199988", res_save.response_text)
+
+        # 2. Call dynamic contact
+        res_call = self.router.route("call John")
+        self.assertEqual(res_call.intent_name, "call_contact")
+        self.assertTrue(len(call_events) >= 1)
+        self.assertEqual(call_events[-1]["name"], "John")
+        self.assertEqual(call_events[-1]["number"], "+15550199988")
+
+        # 3. Call unknown contact prompts to save
+        res_unknown = self.router.route("call Alice")
+        self.assertEqual(res_unknown.intent_name, "call_contact")
+        self.assertIn("don't have a phone number saved for Alice", res_unknown.response_text)
+
+    def test_selective_workspace_routing(self) -> None:
+        match = self.router.route("open only VS Code and browser from my coding workspace")
+        self.assertEqual(match.intent_name, "workspace_selective_launch")
+        self.assertTrue(match.handled_by_fast_path)
+
+
 if __name__ == "__main__":
     unittest.main()
