@@ -10,7 +10,7 @@ gracefully handling offline/no-internet environments.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 try:
     from duckduckgo_search import DDGS  # type: ignore
@@ -27,7 +27,7 @@ class WebSearchTool:
         self.config = config or {}
         self.logger = logging.getLogger("ev.web_search")
         self.max_results: int = int(
-            config.get("automation", {}).get("web_search_max_results", 4)
+            self.config.get("automation", {}).get("web_search_max_results", 4)
         )
 
     def search(self, query: str, max_results: int | None = None) -> List[Dict[str, str]]:

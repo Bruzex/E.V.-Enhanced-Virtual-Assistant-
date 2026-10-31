@@ -13,7 +13,7 @@ import logging
 import platform
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 try:
     import pyautogui  # type: ignore
@@ -39,7 +39,7 @@ class MediaController:
         self.base_dir = base_dir or Path.cwd()
         self.logger = logging.getLogger("ev.media")
         self.is_windows = platform.system().lower().startswith("win")
-        self.screenshots_dir = base_dir / "data" / "screenshots"
+        self.screenshots_dir = self.base_dir / "data" / "screenshots"
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
 
     def play_pause(self) -> bool:
