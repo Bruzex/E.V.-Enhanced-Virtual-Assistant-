@@ -1,0 +1,75 @@
+{
+  "name": "Coding workspace",
+  "description": "Standard developer workspace with editor, terminal, browser, and monitoring tools",
+  "items": [
+    {
+      "id": "vscode",
+      "name": "VS Code",
+      "detail": "~/Projects/ev",
+      "kind": "app",
+      "command": "code ."
+    },
+    {
+      "id": "terminal",
+      "name": "Terminal",
+      "detail": "zsh · ev/ (venv active)",
+      "kind": "terminal",
+      "command": "wt"
+    },
+    {
+      "id": "projects",
+      "name": "Projects folder",
+      "detail": "~/Projects",
+      "kind": "folder",
+      "path": "c:\\Users\\Aadit\\OneDrive\\Documents\\Projects"
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "detail": "github.com/ev-assistant",
+      "kind": "url",
+      "url": "https://github.com"
+    },
+    {
+      "id": "localhost",
+      "name": "Dev server",
+      "detail": "localhost:5173",
+      "kind": "url",
+      "url": "http://localhost:5173"
+    },
+    {
+      "id": "docker",
+      "name": "Docker Desktop",
+      "detail": "3 containers",
+      "kind": "app"
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "detail": "Sprint board · Phase 3",
+      "kind": "app",
+      "url": "https://notion.so"
+    },
+    {
+      "id": "models",
+      "name": "Models folder",
+      "detail": "~/ev/models",
+      "kind": "folder",
+      "path": "models"
+    },
+    {
+      "id": "spotify",
+      "name": "Spotify",
+      "detail": "Focus Flow playlist",
+      "kind": "app"
+    },
+    {
+      "id": "logs",
+      "name": "RAM monitor",
+      "detail": "tail -f logs/rss.log",
+      "kind": "terminal",
+      "command": "Get-Content logs/rss.log -Wait -Tail 20"
+    }
+  ]
+}
+

@@ -1,0 +1,54 @@
+/* =============================================================================
+   E.V. (Enhanced Virtual Assistant) — Dark Holographic HUD Stylesheet
+   Theme: MagicPatterns Cyan-on-Obsidian (#0B0F19, #00D4FF, #7B61FF)
+   ============================================================================= */
+
+QWidget {
+    color: #E6F4FF;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    selection-background-color: #00D4FF;
+    selection-color: #0B0F19;
+}
+
+QMainWindow {
+    background-color: #0B0F19;
+}
+
+QToolTip {
+    background-color: rgba(13, 20, 34, 240);
+    color: #00D4FF;
+    border: 1px solid rgba(0, 212, 255, 120);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 5px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background: rgba(0, 212, 255, 60);
+    min-height: 24px;
+    border-radius: 2px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: rgba(0, 212, 255, 140);
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: transparent;
+    height: 0px;
+}
+
+QLabel {
+    background: transparent;
+}
+

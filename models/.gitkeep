@@ -1,0 +1,6 @@
+# Models Directory
+# Store offline model files here (git-ignored):
+#  - Qwen2.5-3B-Instruct Q4_K_M GGUF: qwen2.5-3b-instruct-q4_k_m.gguf
+#  - Vosk STT Model: vosk-model-small-en-us/
+#  - Piper TTS Voice: piper/
+

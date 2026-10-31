@@ -1,0 +1,79 @@
+# =============================================================================
+# E.V. (Enhanced Virtual Assistant) — Configuration Specification
+# Hardware Target: MSI Bravo 15 (16 GB RAM, AMD Radeon RX 6500M -> 0 VRAM)
+# Constraint: Peak RAM <= 4.0 GB | Strict CPU-only inference (n_gpu_layers=0)
+# =============================================================================
+
+app:
+  name: "E.V."
+  full_name: "Enhanced Virtual Assistant"
+  version: "2.0.0"
+  offline_mode: true
+  log_level: "INFO"
+  log_file: "logs/ev.log"
+  rss_log_file: "logs/rss.log"
+
+hardware:
+  ram_budget_gb: 4.0
+  ram_warning_threshold_gb: 3.4
+  ram_critical_threshold_gb: 3.8
+  monitor_interval_ms: 1000
+  strict_cpu_only: true
+  aggressive_gc: true
+
+llm:
+  provider: "llama_cpp"
+  model_path: "models/qwen2.5-3b-instruct-q4_k_m.gguf"
+  n_gpu_layers: 0
+  n_ctx: 2048
+  n_threads: 6
+  temperature: 0.7
+  max_tokens: 512
+
+voice:
+  stt:
+    model_path: "models/vosk-model-small-en-us"
+    sample_rate: 16000
+  tts:
+    model_path: "models/piper"
+    voice_name: "en_US-lessac-medium"
+    speed: 1.0
+  wake_word:
+    enabled: true
+    phrase: "hey ev"
+    continuous_listening: false
+  clap_detector:
+    enabled: true
+    threshold: 0.65
+    window_sec: 0.8
+
+gui:
+  title: "E.V. — Enhanced Virtual Assistant"
+  width: 1440
+  height: 900
+  min_width: 1024
+  min_height: 640
+  fullscreen: false
+  frameless: false
+  fps: 30
+  background_effect: "grid-and-particles"
+  particle_density: 70
+  scanlines: true
+  minimal_ui: false
+  default_countdown_seconds: 30
+
+remote:
+  phone_adb:
+    enabled: false
+    device_ip: "192.168.1.100"
+    port: 5555
+  whatsapp:
+    enabled: false
+    profile_dir: "data/whatsapp_profile"
+  audio_routing:
+    cable_input_name: "CABLE Input (VB-Audio Virtual Cable)"
+
+memory:
+  sqlite_path: "data/memory.db"
+  chroma_dir: "data/chroma"
+
