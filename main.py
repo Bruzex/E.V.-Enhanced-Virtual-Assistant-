@@ -380,16 +380,17 @@ class SystemBridge(QObject):
 
     def _fallback_mic_command_worker(self) -> None:
         """
-        When no hardware microphone / Vosk model is attached, clicking the HUD
-        Mic dispatches the PRD Section 1.4 benchmark command directly into the
-        real `EventBus` -> `IntentRouter` -> `WorkspaceOrchestrator` -> `TimedCommandScheduler` pipeline.
+        Called when the user clicks the mic but Vosk / microphone is not ready.
+        Just give feedback — do NOT run any demo command.
         """
-        sec = int(self.config.get("gui", {}).get("default_countdown_seconds", 30))
-        sample_cmd = f"Hey E.V., open my coding workspace and prepare a call to Mom in {sec} seconds."
         self.orb_state_changed.emit("listening", 0.0)
-        self.caption_emitted.emit("user", sample_cmd, 2500)
-        threading.Event().wait(1.2)
-        self.bus.publish(Topics.VOICE_USER_COMMAND, {"text": sample_cmd, "source": "gui"}, source="mic")
+        self.caption_emitted.emit(
+            "ev",
+            "Listening… Speech recognition is not ready yet. Please install the Vosk model.",
+            3200,
+        )
+        # Return to idle after a short moment
+        threading.Timer(3.2, lambda: self.orb_state_changed.emit("idle", 0.0)).start()
 
     # =========================================================================
     # Hardware Telemetry, RAM Guardrails & `logs/rss.log` Writer
