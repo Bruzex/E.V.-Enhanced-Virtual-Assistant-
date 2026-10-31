@@ -1,4 +1,4 @@
-# E.V. — Enhanced Virtual Assistant (v2.0)
+# E.V. — Enhanced Virtual Assistant
 
 **100% Offline • Strict CPU-Only (`n_gpu_layers=0`) • ≤ 4.0 GB Peak RAM • Dark Holographic HUD**
 
