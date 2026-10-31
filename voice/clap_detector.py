@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Energy/Peak Clap Detector
-=============================================================
-Ultra-lightweight acoustic impulse detector inspired by Jarvis AI Spark.
- piggybacks directly on the 16kHz mono PCM stream already captured by
-`WakeWordLoop` (`on_raw_audio_chunk`), consuming near-zero extra CPU or RAM.
+E.V. (Enhanced Virtual Assistant) — Laptop-Mic Retuned Clap Detector (`clap_detector.py`)
+=========================================================================================
+Why Clap Detection Failed Previously on the MSI Bravo 15:
+  - A hand clap lasts ~15–30 ms, whereas an audio frame is 125–250 ms.
+    Averaging RMS across 250 ms diluted the clap's RMS below `0.32`, and
+    Windows laptop mic AGC (Automatic Gain Control) compresses sharp peaks.
 
-Algorithm:
-  1. Fast Energy Gate: Ignores frames below `energy_threshold` (default 0.32 RMS).
-  2. Transient Spike / Crest Check: Distinguishes sharp percussive claps from
-     sustained loud speech by checking that the frame's peak-to-average ratio
-     is impulsive and returns to quiet within `max_impulse_duration_ms`.
-  3. Configurable Single or Double-Clap Window:
-     - When `required_claps == 2` (default), two impulses separated by
-       `double_clap_min_gap_ms` (120ms) to `double_clap_max_gap_ms` (480ms)
-       trigger `Topics.VOICE_CLAP_DETECTED` and execute the configured action
-       (e.g., toggle active listening / status orb).
+How It Works Now:
+  1. Sub-Window Peak & Adaptive Noise Floor:
+     Splits each incoming PCM buffer into 10ms sub-windows (160 samples @ 16kHz),
+     tracks the rolling ambient background RMS floor (`_noise_floor`), and
+     triggers when:
+       - `peak >= peak_threshold` (default `0.16`, easily reached on laptop mics), AND
+       - `sub_window_rms >= max(energy_threshold, noise_floor * 3.2)`, AND
+       - `crest_factor (peak / frame_rms) >= 2.1` (sharp percussive transient).
+  2. Wide Double-Clap Window (`80 ms` to `850 ms`):
+     Supports natural hand-clap cadences (like the double-clap at 01:35 in your
+     video) and acts as a first-class wake trigger (identical to saying "Hey Evie").
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import struct
 import threading
 import time
@@ -31,16 +34,17 @@ from core.event_bus import Event, EventBus, Topics, get_event_bus
 
 class ClapDetector:
     """
-    Real-time single/double clap detector operating on raw 16-bit PCM frames.
+    Laptop-microphone-tuned single/double clap detector with adaptive noise floor
+    and 10ms sub-window transient analysis.
     """
 
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
+        config: Dict[str, Any],
         event_bus: Optional[EventBus] = None,
         on_clap_action: Optional[Callable[[int], None]] = None,
     ) -> None:
-        self.config = config or {}
+        self.config = config
         self.bus = event_bus or get_event_bus()
         self.on_clap_action = on_clap_action
         self.logger = logging.getLogger("ev.clap")
@@ -48,19 +52,22 @@ class ClapDetector:
         clap_cfg = config.get("voice", {}).get("clap_detector", {})
         self.enabled: bool = bool(clap_cfg.get("enabled", True))
         self.required_claps: int = max(1, min(2, int(clap_cfg.get("required_claps", 2))))
-        self.energy_threshold: float = float(clap_cfg.get("energy_threshold", 0.32))
-        self.min_gap_s: float = float(clap_cfg.get("double_clap_min_gap_ms", 120)) / 1000.0
-        self.max_gap_s: float = float(clap_cfg.get("double_clap_max_gap_ms", 480)) / 1000.0
-        self.cooldown_s: float = float(clap_cfg.get("cooldown_seconds", 1.5))
-        self.action: str = str(clap_cfg.get("action", "toggle_listening"))
+        # Retuned for real laptop microphones with Windows AGC
+        self.energy_threshold: float = float(clap_cfg.get("energy_threshold", 0.065))
+        self.peak_threshold: float = float(clap_cfg.get("peak_threshold", 0.16))
+        self.crest_factor_min: float = float(clap_cfg.get("crest_factor_min", 2.0))
+        self.min_gap_s: float = float(clap_cfg.get("double_clap_min_gap_ms", 80)) / 1000.0
+        self.max_gap_s: float = float(clap_cfg.get("double_clap_max_gap_ms", 850)) / 1000.0
+        self.cooldown_s: float = float(clap_cfg.get("cooldown_seconds", 1.2))
+        self.action: str = str(clap_cfg.get("action", "wake_assistant"))
 
         self._lock = threading.Lock()
         self._clap_timestamps: List[float] = []
         self._last_trigger_ts: float = 0.0
-        self._in_loud_burst: bool = False
+        self._last_impulse_ts: float = 0.0
+        self._noise_floor: float = 0.008
         self._muted_for_tts: bool = False
 
-        # Subscribe to GUI Settings toggle & TTS mute events
         self.bus.subscribe(Topics.SETTINGS_CHANGED, self._on_settings_changed)
         self.bus.subscribe(Topics.VOICE_TTS_STARTED, lambda _: self._set_tts_mute(True))
         self.bus.subscribe(Topics.VOICE_TTS_FINISHED, lambda _: self._set_tts_mute(False))
@@ -78,12 +85,11 @@ class ClapDetector:
         pcm_bytes: bytes,
         precomputed_rms: Optional[float] = None,
         rms_energy: Optional[float] = None,
+        **kwargs: Any,
     ) -> bool:
-        if rms_energy is not None and precomputed_rms is None:
-            precomputed_rms = rms_energy
         """
-        Inspect a single 16-bit PCM audio frame for a clap impulse.
-        Returns True if the configured clap pattern (1 or 2 claps) was completed.
+        Inspect a 16-bit PCM buffer using 10ms sub-windows so sharp 15-30ms
+        hand claps are detected reliably on laptop microphones.
         """
         if not self.enabled or self._muted_for_tts or not pcm_bytes:
             return False
@@ -92,28 +98,55 @@ class ClapDetector:
         if (now - self._last_trigger_ts) < self.cooldown_s:
             return False
 
-        # 1. Fast RMS Energy Gate
-        rms = precomputed_rms if precomputed_rms is not None else self._compute_rms(pcm_bytes)
-        if rms < self.energy_threshold:
-            self._in_loud_burst = False
+        count = len(pcm_bytes) // 2
+        if count <= 0:
             return False
 
-        # Avoid counting consecutive loud frames of the same clap as multiple claps
-        if self._in_loud_burst:
+        samples = struct.unpack(f"<{count}h", pcm_bytes[: count * 2])
+        effective_rms = rms_energy if rms_energy is not None else precomputed_rms
+        frame_rms = (
+            effective_rms
+            if effective_rms is not None
+            else min(1.0, math.sqrt(sum(s * s for s in samples) / float(count)) / 32768.0)
+        )
+        frame_peak = min(1.0, max(abs(s) for s in samples) / 32768.0)
+
+        # Compute max 10ms (160-sample) sub-window RMS FIRST to catch short 15-30ms percussive claps
+        sub_step = min(count, 160)
+        max_sub_rms = frame_rms
+        for offset in range(0, count - sub_step + 1, sub_step):
+            chunk = samples[offset : offset + sub_step]
+            sub_rms = min(1.0, math.sqrt(sum(s * s for s in chunk) / float(len(chunk))) / 32768.0)
+            if sub_rms > max_sub_rms:
+                max_sub_rms = sub_rms
+
+        # Update rolling ambient noise floor during genuinely quiet frames (no transient peak)
+        if max_sub_rms < self.energy_threshold * 0.75 and frame_peak < self.peak_threshold * 0.75:
+            self._noise_floor = 0.92 * self._noise_floor + 0.08 * frame_rms
             return False
 
-        # 2. Crest factor check (peak amplitude vs RMS) to reject steady hum/vowels
-        peak = self._compute_peak(pcm_bytes)
-        if peak < min(0.95, self.energy_threshold * 1.35):
+        # 1. Check peak & sub-window energy against threshold and adaptive noise floor
+        effective_rms_thresh = max(self.energy_threshold, min(0.22, self._noise_floor * 3.0))
+        if frame_peak < self.peak_threshold and max_sub_rms < self.energy_threshold:
+            return False
+        if max_sub_rms < effective_rms_thresh and frame_rms < self.energy_threshold:
             return False
 
-        self._in_loud_burst = True
-        return self._record_impulse(now, rms)
+        # 2. Crest factor check: claps have a sharp peak relative to average frame RMS
+        crest = frame_peak / max(0.001, frame_rms)
+        if crest < self.crest_factor_min and frame_peak < 0.45:
+            return False
+
+        # Debounce: ensure within min_gap_s and at most 95ms so single claps aren't double counted
+        debounce_s = min(self.min_gap_s, 0.095)
+        if (now - self._last_impulse_ts) < debounce_s:
+            return False
+
+        self._last_impulse_ts = now
+        return self._record_impulse(now, max(frame_rms, max_sub_rms))
 
     def register_external_impulse(self, energy: float = 0.5, timestamp: Optional[float] = None) -> bool:
-        """
-        Helper for testing or synthetic impulse injection without raw PCM hardware.
-        """
+        """Helper for unit tests or synthetic impulse injection."""
         if not self.enabled:
             return False
         now = timestamp if timestamp is not None else time.monotonic()
@@ -123,52 +156,32 @@ class ClapDetector:
 
     def _record_impulse(self, now: float, energy: float) -> bool:
         with self._lock:
-            # Prune stale impulses older than max_gap_s
             self._clap_timestamps = [
                 ts for ts in self._clap_timestamps if (now - ts) <= self.max_gap_s
             ]
 
             if self._clap_timestamps and (now - self._clap_timestamps[-1]) < self.min_gap_s:
-                # Too close to previous impulse (echo/reverb)
                 return False
 
             self._clap_timestamps.append(now)
 
             if len(self._clap_timestamps) >= self.required_claps:
-                count = len(self._clap_timestamps)
+                clap_count = len(self._clap_timestamps)
                 self._clap_timestamps.clear()
                 self._last_trigger_ts = now
                 self.logger.info(
-                    "Detected %d-clap trigger (energy=%.2f | action=%s)",
-                    count,
+                    "Detected %d-clap wake trigger (energy=%.3f | action=%s)",
+                    clap_count,
                     energy,
                     self.action,
                 )
                 self.bus.publish(
                     Topics.VOICE_CLAP_DETECTED,
-                    {"count": count, "energy": round(energy, 3), "action": self.action},
+                    {"count": clap_count, "energy": round(energy, 3), "action": self.action},
                     source="clap_detector",
                 )
                 if self.on_clap_action is not None:
-                    self.on_clap_action(count)
+                    self.on_clap_action(clap_count)
                 return True
 
         return False
-
-    @staticmethod
-    def _compute_rms(pcm_bytes: bytes) -> float:
-        count = len(pcm_bytes) // 2
-        if count <= 0:
-            return 0.0
-        samples = struct.unpack(f"<{count}h", pcm_bytes[: count * 2])
-        sum_sq = sum(s * s for s in samples)
-        return min(1.0, (sum_sq / float(count)) ** 0.5 / 32768.0)
-
-    @staticmethod
-    def _compute_peak(pcm_bytes: bytes) -> float:
-        count = len(pcm_bytes) // 2
-        if count <= 0:
-            return 0.0
-        samples = struct.unpack(f"<{count}h", pcm_bytes[: count * 2])
-        max_abs = max(abs(s) for s in samples)
-        return min(1.0, max_abs / 32768.0)

@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Local LLM Brain & Conversational Engine
-===========================================================================
+E.V. (Enhanced Virtual Assistant) — Local LLM Brain & Safe Conversational Engine
+================================================================================
 Strictly CPU-only local inference wrapper (`n_gpu_layers=0`) with a natural,
-calm, JARVIS-inspired conversational responder and long-term memory learning.
+calm, JARVIS-inspired conversational responder and strict privacy/safety guards.
 
 Key Guarantees:
   1. NEVER echoes "I heard: '...'" or mentions internal model names, GGUF files,
      llama.cpp, or missing model directories to the user.
-  2. Identity & Creator Persona:
-     Replies naturally as E.V. (Enhanced Virtual Assistant) created by Bruprog.
-  3. Long-Term Memory & Conversation Learning:
-     Works with `RAGMemoryManager` (SQLite + ChromaDB) to recall past conversations,
-     learned user preferences, and facts across sessions, and answers natural
-     questions (identity, capabilities, math, greetings, advice, status, time/date,
-     continuous listening, and past conversation recall) cleanly even when
-     `llama-cpp-python` is not installed.
+  2. NEVER leaks personal profile fields (e.g., "From what I remember, Aditya Raj")
+     or contact phone numbers on general or unrecognized questions. Personal
+     information is ONLY spoken when the user explicitly asks for that specific field.
+  3. Replies naturally as E.V. (Enhanced Virtual Assistant) created by Bruprog,
+     including audio check-ins ("Can you hear me?", "Are you able to hear me?").
 """
 
 from __future__ import annotations
@@ -135,8 +132,9 @@ class Brain:
                 (
                     "You are E.V. (Enhanced Virtual Assistant), a calm, articulate, slightly formal "
                     "yet warm sci-fi AI assistant created by Bruprog and inspired by JARVIS. "
-                    "Never repeat the user's question back with 'I heard', and never mention model "
-                    "filenames or technical internals. Keep responses concise (1 to 2 sentences) "
+                    "Never repeat the user's question back with 'I heard', never mention model "
+                    "filenames or technical internals, and never read out personal profile data "
+                    "unless explicitly asked. Keep responses concise (1 to 2 sentences) "
                     "so they sound natural when spoken aloud."
                 ),
             )
@@ -157,7 +155,6 @@ class Brain:
     def set_rag(self, rag: Any) -> None:
         """Attach the RAGMemoryManager so Brain can learn from and query past conversations."""
         self.rag = rag
-        # Hydrate recent conversation turns from SQLite on startup
         if self.rag is not None and hasattr(self.rag, "sqlite"):
             try:
                 past = self.rag.sqlite.recent_turns(limit=4)
@@ -209,7 +206,6 @@ class Brain:
             if not LLAMA_CPP_AVAILABLE or not self.model_path.exists():
                 return False
 
-            # Guard against truncated/incomplete GGUF files (< 100 MB)
             try:
                 if self.model_path.stat().st_size < 100 * 1024 * 1024:
                     return False
@@ -294,18 +290,19 @@ class Brain:
     ) -> str:
         """
         Generate a natural, spoken-friendly response to `user_prompt`.
-        Never echoes "I heard..." and never exposes internal model filenames.
+        Never echoes "I heard...", never exposes internal model filenames,
+        and never leaks profile data on unrelated utterances.
         """
         cleaned_prompt = (user_prompt or "").strip()
-        if not cleaned_prompt:
-            return "I'm listening. How can I help?"
+        if not cleaned_prompt or len(cleaned_prompt) <= 2:
+            return "I'm listening."
 
         t_start = time.perf_counter()
         self.bus.publish(Topics.BRAIN_THINKING_STARTED, {"prompt": cleaned_prompt}, source="brain")
         self.bus.publish(Topics.ORB_STATE, {"state": "thinking", "progress": 0.0}, source="brain")
 
         with self._lock:
-            # 1. Check direct identity / creator / capability questions first for instant consistency
+            # 1. Check direct identity / creator / capability / audio check-in questions first
             direct = self._check_identity_or_direct_intent(cleaned_prompt)
             if direct is not None:
                 reply = direct
@@ -336,7 +333,7 @@ class Brain:
                 reply = self._conversational_fallback(cleaned_prompt, extra_context)
 
             if not reply:
-                reply = "I'm right here and ready whenever you need me."
+                reply = "I'm listening. How can I help?"
 
             if remember:
                 self._history.append({"role": "user", "content": cleaned_prompt})
@@ -420,11 +417,27 @@ class Brain:
         return messages
 
     # =========================================================================
-    # Natural Conversational & Memory-Aware Offline Responder
+    # Natural Conversational & Memory-Aware Offline Responder (Safe & Grounded)
     # =========================================================================
     def _check_identity_or_direct_intent(self, prompt: str) -> Optional[str]:
         low = re.sub(r"[^a-z0-9\s]", " ", prompt.lower())
         low = re.sub(r"\s+", " ", low).strip()
+
+        # Audio / Listening Check-ins ("Are you able to hear me?", "Can you hear me?", "Are you listening?")
+        if any(
+            phrase in low
+            for phrase in (
+                "can you hear me",
+                "able to hear me",
+                "are you hearing me",
+                "are you listening",
+                "am i audible",
+                "do you hear me",
+                "hear me",
+                "are you there",
+            )
+        ):
+            return "Yes, I can hear you clearly. How can I help?"
 
         # Identity / Who are you / What is your name / Tell me about yourself
         if any(
@@ -438,6 +451,7 @@ class Brain:
                 "introduce yourself",
                 "are you jarvis",
                 "are you ev",
+                "are you evie",
             )
         ):
             return self.IDENTITY_RESPONSE
@@ -476,13 +490,19 @@ class Brain:
     def _conversational_fallback(self, prompt: str, extra_context: Optional[str] = None) -> str:
         """
         Natural, calm JARVIS-style conversational responder when operating without
-        `llama-cpp-python`. Uses long-term memory (`RAGMemoryManager`), math evaluation,
-        and conversational intent matching — never echoes 'I heard...' or mentions models.
+        `llama-cpp-python`.
+        SAFETY GUARANTEE: Never dumps random user profile facts ("From what I remember, Aditya Raj")
+        unless the user explicitly asked a memory/profile question.
         """
         low = prompt.lower().strip()
         clean_words = re.sub(r"[^a-z0-9\s]", " ", low)
         clean_words = re.sub(r"\s+", " ", clean_words).strip()
         now = datetime.now()
+
+        # Guard: if utterance is very short or fragmented, respond gently without guessing
+        words_list = clean_words.split()
+        if not words_list or (len(words_list) == 1 and len(words_list[0]) <= 3 and words_list[0] not in ("hi", "hey", "time", "date")):
+            return "I'm listening."
 
         # 1. Greetings & Check-ins
         if clean_words in ("hi", "hello", "hey", "hey there", "good morning", "good afternoon", "good evening"):
@@ -503,9 +523,8 @@ class Brain:
                 "just speak naturally, and you can interrupt me or say continue at any time."
             )
 
-        # 3. Past conversation / Long-term memory lookup
+        # 3. Explicit Past Conversation / Long-term Memory Lookup ONLY when user asks for it
         if self.rag is not None:
-            # Check if user is asking about something stored in preferences or past conversations
             if any(
                 q in clean_words
                 for q in (
@@ -515,19 +534,18 @@ class Brain:
                     "previous conversation",
                     "do you remember",
                     "what is my",
+                    "whats my",
                     "who is my",
                     "where is my",
                     "when is my",
                 )
             ):
+                fact_answer = self.rag.find_direct_fact_answer(prompt)
+                if fact_answer:
+                    return fact_answer
                 recalled = self.rag.recall_conversational(prompt)
                 if recalled:
                     return recalled
-
-            # Also check if RAG found a high-confidence preference match for general questions
-            fact_answer = self.rag.find_direct_fact_answer(prompt)
-            if fact_answer:
-                return fact_answer
 
         # 4. Spoken Arithmetic / Math ("what is 25 times 14", "calculate 120 / 4")
         math_reply = self._try_math_evaluation(clean_words)
@@ -535,13 +553,13 @@ class Brain:
             return math_reply
 
         # 5. Time & Date
-        if "time" in clean_words:
+        if re.search(r"\btime\b", clean_words):
             return f"It is currently {now.strftime('%I:%M %p')}."
-        if "date" in clean_words or "day is it" in clean_words:
+        if re.search(r"\bdate\b", clean_words) or "day is it" in clean_words:
             return f"Today is {now.strftime('%A, %B %d, %Y')}."
 
         # 6. System & Hardware Status
-        if any(w in clean_words for w in ("ram", "memory", "cpu", "status", "system", "battery")):
+        if any(w in words_list for w in ("ram", "memory", "cpu", "status", "system", "battery")):
             cpu = int(round(psutil.cpu_percent(interval=None))) if (PSUTIL_AVAILABLE and psutil is not None) else 14
             rss = self._current_process_rss_gb()
             return (
@@ -550,38 +568,28 @@ class Brain:
             )
 
         # 7. Workspaces, Timers & Calls
-        if "workspace" in clean_words and ("call" in clean_words or "mom" in clean_words):
+        if "workspace" in words_list and ("call" in words_list or "mom" in words_list):
             sec = self.config.get("gui", {}).get("default_countdown_seconds", 30)
             return f"Launching your coding workspace now, and I'll prepare your call to Mom in {sec} seconds."
-        if "workspace" in clean_words:
+        if "workspace" in words_list:
             return "Right away. Launching your workspace now."
-        if "dim" in clean_words or "light" in clean_words:
+        if "dim" in words_list or "light" in words_list or "lights" in words_list:
             return "Understood. Dimming your desk lights."
-        if "call" in clean_words:
+        if "call" in words_list:
             return "Preparing your call through the phone bridge."
 
         # 8. Jokes / Light personality
-        if "joke" in clean_words or "funny" in clean_words:
+        if "joke" in words_list or "funny" in words_list:
             return "Why do programmers prefer dark mode? Because light attracts bugs."
 
-        # 9. If the user states a personal fact ("my name is...", "I like...", "I work on..."), learn it automatically!
+        # 9. If the user explicitly states a personal fact ("my name is...", "Arin is my friend..."), learn it
         if self.rag is not None:
             learned = self.rag.auto_learn_from_statement(prompt)
             if learned:
                 return learned
 
-        # 10. Check if extra_context has a direct user fact (not raw turn dump)
-        if extra_context:
-            for line in extra_context.strip().splitlines():
-                if line.startswith("- User fact"):
-                    fact_part = line.split(":", 1)[-1].strip()
-                    if fact_part:
-                        return f"From what I remember, {fact_part}."
-
-        return (
-            "I've noted that. If you'd like me to open an app, launch a workspace, "
-            "set a timer, or remember a specific detail for later, just say the word."
-        )
+        # 10. Safe, polite clarification when speech was unclear or unrecognized (NEVER dump profile data!)
+        return "Sorry, I didn't catch a clear command there. Could you repeat what you'd like me to do?"
 
     @staticmethod
     def _try_math_evaluation(clean_words: str) -> Optional[str]:

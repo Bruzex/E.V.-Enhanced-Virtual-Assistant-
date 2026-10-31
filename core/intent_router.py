@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Personal Digital Companion Intent Router (v3.0)
+E.V. (Enhanced Virtual Assistant) — Personal Digital Companion Intent Router (v3.1)
 ===================================================================================
 Natural-language intent engine combining:
-  1. Personal Identity & Profile Management:
-     - "What's my mobile number?", "What's my Instagram username?",
-       "When is my birthday?", "What is my email address?"
-     - "My mobile number is ...", "My Instagram username is @..."
-  2. Friends, Family & Contact Intelligence (with Ambiguity Guard):
-     - "Who is Arin?", "What's Arin's phone number?", "Find my brother's mobile number",
-       "What is Arin's Instagram?", "Open my contacts and search for Arin"
-     - "Arin is my friend", "Arin's phone number is ...", "Save contact Arin ..."
-  3. Mobile Application Integration (Instagram, WhatsApp, Phone & Contacts):
-     - Instagram: "Open Instagram", "Open my Instagram profile", "Find Arin on Instagram"
-     - WhatsApp: "Open WhatsApp", "Send a hello message to Arin on WhatsApp",
-       "Hey, send Arin a hello message on WhatsApp", "Message Arin on WhatsApp",
-       "What was the last message I sent to Arin?"
-     - Phone: "Call my mother", "Call Arin"
-  4. Permission & Confirmation Gate (`_pending_confirmation`):
-     - When `security.require_confirmation_for_messages` or `require_confirmation_for_calls`
-       is enabled in `config.yaml`, E.V. asks for confirmation ("Should I send the
-       WhatsApp message 'Hello' to Arin? Say yes to confirm or no to cancel")
-       before executing sensitive outbound actions.
+  1. STT Confidence & Safety Guard (Priority 2 & 5):
+     - Normalizes Indian English Vosk transcripts ("what's up" -> "whatsapp",
+       "mummy" -> "mom", "hey e the are" -> "hey evie who are you").
+     - When voice recognition confidence is below `min_confidence` (0.48), refuses
+       to execute random intents and replies:
+       "Sorry, I didn't catch that clearly. Can you repeat?"
+     - If the user only says "Hey Evie" or trailing noise after the wake word,
+       replies "I'm listening." and never leaks personal profile data.
+  2. Strict Volume Control Pattern (Priority 2 & 5):
+     - Fixes the bug where bare "up" (e.g. from "what's up" / "WhatsApp") triggered
+       "Volume increased". Volume changes now require the word "volume", "sound",
+       "audio", "louder", or "quieter".
+  3. Continuous Listening & Sleep Commands (Priority 4):
+     - Supports "stop listening", "go to sleep", "stand by" to exit continuous
+       listening mode cleanly, and "start listening" / "continuous listening" to re-enable.
+  4. Personal Identity, Contacts & Mobile App Integration (Instagram, WhatsApp, Phone):
+     - Handles compound WhatsApp commands ("Open WhatsApp and send a hello message to Mummy"),
+       contact resolution, ambiguity disambiguation, and confirmation gates.
 """
 
 from __future__ import annotations
@@ -35,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Pattern
 
 from core.event_bus import EventBus, Topics, get_event_bus
 from memory.sqlite_store import mask_pii
+from voice.stt import VoskSTT
 
 
 @dataclass
@@ -63,12 +63,36 @@ class IntentRule:
     description: str = ""
 
 
+# Single-word noise fragments that sometimes trail after a wake word in Vosk
+_NOISE_FRAGMENTS = {
+    "the",
+    "a",
+    "an",
+    "uh",
+    "um",
+    "ah",
+    "hm",
+    "hmm",
+    "oh",
+    "eh",
+    "he",
+    "be",
+    "e",
+    "v",
+    "to",
+    "of",
+    "in",
+    "it",
+    "is",
+    "are",
+    "the are",
+    "e the",
+}
+
+
 class IntentRouter:
     """
-    Personal Companion Hybrid Intent Router.
-    Evaluates priority-ordered natural language rules first (0 MB LLM RAM),
-    enforces permission/confirmation gates on sensitive outbound actions,
-    and falls back to `Brain.generate(extra_context=rag_context)` for open-ended chat.
+    Personal Companion Hybrid Intent Router with STT Confidence Guard & Indian English Normalization.
     """
 
     def __init__(
@@ -103,6 +127,10 @@ class IntentRouter:
         sec_cfg = config.get("security", {})
         self.confirm_messages: bool = bool(sec_cfg.get("require_confirmation_for_messages", False))
         self.confirm_calls: bool = bool(sec_cfg.get("require_confirmation_for_calls", False))
+
+        stt_cfg = config.get("voice", {}).get("stt", {})
+        self.min_confidence: float = float(stt_cfg.get("min_confidence", 0.48))
+
         self._pending_action: Optional[Callable[[], str]] = None
         self._pending_description: str = ""
 
@@ -130,28 +158,40 @@ class IntentRouter:
         )
         self._rules.sort(key=lambda r: r.priority)
 
-    def route(self, text: str, context: Optional[Dict[str, Any]] = None) -> IntentMatch:
+    def route(
+        self,
+        text: str,
+        context: Optional[Dict[str, Any]] = None,
+        confidence: Optional[float] = None,
+    ) -> IntentMatch:
         """
-        Route a user utterance through confirmation gates and fast-path rules first.
+        Route a user utterance through normalization, confidence gates, and fast-path rules first.
         Only falls back to `Brain.generate()` if no deterministic rule matches.
         """
         t0 = time.perf_counter()
         ctx = dict(context) if context else {}
-        cleaned = self._strip_wake_prefix((text or "").strip())
+        conf = float(confidence if confidence is not None else ctx.get("confidence", 1.0))
 
-        if not cleaned:
+        # Apply Indian English phonetic normalization ("what's up" -> "whatsapp", "mummy" -> "mom")
+        normalized_input = VoskSTT.normalize_indian_english_transcript((text or "").strip())
+        cleaned = self._strip_wake_prefix(normalized_input)
+
+        # Safety Guard 1: If user only said "Hey Evie" or trailing noise fragments, respond "I'm listening."
+        low_clean = re.sub(r"[^a-z0-9\s]", " ", cleaned.lower())
+        low_clean = re.sub(r"\s+", " ", low_clean).strip()
+
+        if not low_clean or low_clean in _NOISE_FRAGMENTS or len(low_clean) <= 1:
             return IntentMatch(
-                intent_name="empty",
+                intent_name="wake_acknowledge",
                 raw_text=text,
-                response_text="Standing by.",
+                response_text="I'm listening.",
                 handled_by_fast_path=True,
-                latency_ms=0.0,
+                latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             )
 
         # 0. Check if we are waiting for user confirmation ("yes" / "confirm" / "no" / "cancel")
         if self._pending_action is not None:
-            low_c = cleaned.lower().strip(".?!")
-            if low_c in ("yes", "yeah", "yep", "confirm", "send it", "do it", "go ahead", "sure", "okay", "ok"):
+            if low_clean in ("yes", "yeah", "yep", "confirm", "send it", "do it", "go ahead", "sure", "okay", "ok"):
                 action_fn = self._pending_action
                 self._pending_action = None
                 self._pending_description = ""
@@ -164,7 +204,7 @@ class IntentRouter:
                     handled_by_fast_path=True,
                     latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
                 )
-            if low_c in ("no", "nope", "cancel", "stop", "don't", "abort", "never mind"):
+            if low_clean in ("no", "nope", "cancel", "stop", "don t", "dont", "abort", "never mind"):
                 self._pending_action = None
                 self._pending_description = ""
                 reply = "Cancelled. I won't send or execute that action."
@@ -176,6 +216,33 @@ class IntentRouter:
                     handled_by_fast_path=True,
                     latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
                 )
+
+        # Safety Guard 2: Low STT Confidence Gate (Priority 2)
+        # Do not execute random system/app commands when Vosk confidence is below threshold
+        exempt_phrases = (
+            "continue",
+            "stop listening",
+            "go to sleep",
+            "stand by",
+            "who are you",
+            "can you hear me",
+            "are you able to hear me",
+            "are you listening",
+        )
+        if conf < self.min_confidence and not any(ep in low_clean for ep in exempt_phrases):
+            self.logger.info(
+                "Rejected low-confidence STT transcript (conf=%.2f < %.2f): '%s'",
+                conf,
+                self.min_confidence,
+                mask_pii(cleaned),
+            )
+            return IntentMatch(
+                intent_name="low_confidence",
+                raw_text=cleaned,
+                response_text="Sorry, I didn't catch that clearly. Can you repeat?",
+                handled_by_fast_path=True,
+                latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            )
 
         # 1. Check compound command (Workspace + Timed Call/Action)
         compound = self._try_compound_command(cleaned, ctx)
@@ -202,9 +269,10 @@ class IntentRouter:
 
                     latency = round((time.perf_counter() - t0) * 1000.0, 2)
                     self.logger.info(
-                        "Fast-path intent '%s' matched in %.2f ms (input='%s')",
+                        "Fast-path intent '%s' matched in %.2f ms (conf=%.2f, input='%s')",
                         rule.name,
                         latency,
+                        conf,
                         mask_pii(cleaned),
                     )
                     self._log_to_memory(cleaned, reply, rule.name)
@@ -217,7 +285,7 @@ class IntentRouter:
                         latency_ms=latency,
                     )
 
-        # 3. Fall through to CPU-only Local LLM (Qwen2.5-3B-Instruct Q4_K_M) with RAG context
+        # 3. Fall through to CPU-only Local LLM / Safe Conversational Brain
         self.logger.info("Routing conversational query to Brain: '%s'", mask_pii(cleaned))
         rag_ctx = self.rag.build_context_for_prompt(cleaned) if self.rag is not None else None
         reply = (
@@ -236,7 +304,7 @@ class IntentRouter:
         )
 
     def _log_to_memory(self, user_text: str, assistant_text: str, intent_name: str) -> None:
-        if self.rag is not None:
+        if self.rag is not None and intent_name not in ("wake_acknowledge", "low_confidence", "empty"):
             try:
                 self.rag.record_interaction(user_text, assistant_text, intent_name=intent_name)
             except Exception:
@@ -245,7 +313,7 @@ class IntentRouter:
     @staticmethod
     def _strip_wake_prefix(text: str) -> str:
         return re.sub(
-            r"^(?:hey\s+(?:e\.?v\.?|eve|ivy|easy|tv|a\s*v|heavy)|okay\s+e\.?v\.?|ok\s+e\.?v\.?|hi\s+e\.?v\.?|e\.?v\.?|jarvis|hey)[\s,.:;-]*",
+            r"^(?:(?:hey|hi|hello|okay|ok|yo)\s+(?:evie|e\s*\.?\s*v\.?|eve|ivy|avi|easy|tv|a\s*v|v|heavy|baby|every|movie|he\s+be|e\s+the|eb)|evie|e\.?v\.?|jarvis|hey)[\s,.:;-]*",
             "",
             text,
             flags=re.IGNORECASE,
@@ -342,18 +410,19 @@ class IntentRouter:
             description="Immediately stop E.V. from speaking",
         )
 
-        # 6: Continuous Listening Voice Toggle
+        # 6: Continuous Listening & Standby Mode Voice Toggle ("stop listening", "go to sleep", "continuous listening")
         self.register(
             name="continuous_listening_mode",
             priority=6,
             patterns=[
-                r"\b(?:continuously\s+listen(?:ing)?|continuous\s+listening|always\s+listen(?:ing)?|keep\s+listening)\b",
+                r"^(?:please\s+)?(?P<sleep>stop\s+listening|go\s+to\s+sleep|stand\s*by|pause\s+listening|sleep\s+mode)$",
+                r"\b(?:continuously\s+listen(?:ing)?|continuous\s+listening|always\s+listen(?:ing)?|keep\s+listening|start\s+listening)\b",
             ],
             handler=self._handle_continuous_listening,
-            description="Enable always-on continuous listening mode",
+            description="Enable or exit always-on continuous listening mode",
         )
 
-        # 7: Identity ("Who are you?", "What is your name?", "Who created you?")
+        # 7: Identity & Audio Check-in ("Who are you?", "Can you hear me?", "Are you able to hear me?")
         self.register(
             name="assistant_identity",
             priority=7,
@@ -361,9 +430,10 @@ class IntentRouter:
                 r"^(?:who|what)\s+are\s+you\??$",
                 r"^(?:what(?:'s|\s+is)\s+your\s+name|tell\s+me\s+about\s+yourself|introduce\s+yourself)\??$",
                 r"^who\s+(?:created|made|built|developed)\s+you\??$",
+                r"\b(?P<checkin>can\s+you\s+hear\s+me|are\s+you\s+able\s+to\s+hear\s+me|are\s+you\s+listening|do\s+you\s+hear\s+me|am\s+i\s+audible)\??$",
             ],
             handler=self._handle_assistant_identity,
-            description="Respond with E.V.'s natural Bruprog identity",
+            description="Respond with E.V.'s natural Bruprog identity or audio check-in confirmation",
         )
 
         # 8: Timer Cancel / Run Now
@@ -414,8 +484,21 @@ class IntentRouter:
             description="Launch a saved multi-app JSON workspace",
         )
 
+        # 16: Natural Personal Profile & Contact Teaching Statements
+        self.register(
+            name="personal_fact_statement",
+            priority=16,
+            patterns=[
+                r"^(?:remember\s+that\s+)?(?P<person>[a-zA-Z0-9]+)\s+is\s+my\s+(?P<rel>friend|best\s+friend|brother|sister|mother|father|mom|dad|colleague|cousin)(?:[\s,;]+(?:and\s+)?(?:his|her|their)\s+(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram)\s+is\s+(?P<val>.+))?$",
+                r"^(?:update|set|change|remember\s+that)\s+(?P<person2>[a-zA-Z0-9\s]+?)'s\s+(?P<attr2>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram(?:\s+username)?|birthday)\s+(?:to|is|as)\s+(?P<val2>.+)$",
+                r"^(?P<person3>[a-zA-Z0-9]+)'s\s+(?P<attr3>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram(?:\s+username)?|birthday)\s+is\s+(?P<val3>.+)$",
+                r"^(?:remember\s+that\s+)?(?:my\s+(?:full\s+name|name|nickname|mobile\s+number|phone\s+number|cell\s+number|mobile|phone|email(?:\s+address)?|instagram(?:\s+username|\s+handle|\s+id)?|birthday|date\s+of\s+birth|dob|age|home\s+address|address)|i\s+live\s+in)\s+(?:is\s+)?(?P<self_val>.+)$",
+            ],
+            handler=self._handle_personal_fact_statement,
+            description="Teach E.V. personal profile fields and contact details naturally by voice",
+        )
+
         # 17: Personal Identity & Self Profile Queries
-        #     ("What's my mobile number?", "What's my Instagram username?", "When is my birthday?", "What is my email address?")
         self.register(
             name="personal_profile_query",
             priority=17,
@@ -428,7 +511,6 @@ class IntentRouter:
         )
 
         # 18: Instagram App & Profile Automation
-        #     ("Open Instagram", "Open my Instagram profile", "Find Arin on Instagram", "Open Arin's Instagram")
         self.register(
             name="instagram_action",
             priority=18,
@@ -443,7 +525,6 @@ class IntentRouter:
         )
 
         # 19: Friends, Family & Contact Queries & Updates
-        #     ("Who is Arin?", "What's Arin's phone number?", "Find my brother's mobile number", "Open my contacts and search for Arin")
         self.register(
             name="contact_management",
             priority=19,
@@ -470,23 +551,25 @@ class IntentRouter:
             description="Schedule a delayed command with visual HUD countdown",
         )
 
-        # 22: Natural Language WhatsApp Messaging, Voice Notes & Last Message Recall
-        #     - "What was the last message I sent to Arin?"
+        # 22: Natural Language WhatsApp Messaging, Compound Open+Send, Voice Notes & Last Message Recall
+        #     Covers:
+        #     - "Open WhatsApp and send a hello message to Mummy"
+        #     - "Send a hello message to Mom" / "Send a hello message to Arin on WhatsApp"
         #     - "Hey, send Arin a hello message on WhatsApp"
-        #     - "Send a hello message to Arin on WhatsApp"
         #     - "Message Arin on WhatsApp saying hello"
-        #     - "Message Arin on WhatsApp"
         #     - "Open WhatsApp"
         self.register(
             name="whatsapp_action",
             priority=22,
             patterns=[
                 r"^what\s+was\s+the\s+last\s+(?:whatsapp\s+)?message\s+i\s+sent\s+to\s+(?P<last_person>[a-zA-Z0-9\s]+?)\??$",
+                r"^(?:open|launch)\s+whatsapp\s+and\s+send\s+(?:a\s+)?(?P<msg>.+?)\s+message\s+to\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)$",
+                r"^(?:open|launch)\s+whatsapp\s+and\s+(?:send\s+(?:a\s+)?message\s+to|message|text)\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)(?:\s+(?:saying|that|:)\s+(?P<msg>.+))?$",
                 r"^(?:open|launch)\s+(?P<open_only>whatsapp)$",
                 r"\bsend\s+(?:a\s+)?whatsapp\s+voice\s+note\s+to\s+(?P<contact>[a-z0-9\s]+?)\s+(?:saying|that|:)\s+(?P<msg>.+)$",
                 r"\bsend\s+(?:a\s+)?whatsapp\s+(?:message\s+)?to\s+(?P<contact>[a-z0-9\s]+?)\s+(?:saying|that|:)\s+(?P<msg>.+)$",
-                r"\bsend\s+(?P<contact>[a-z0-9\s]+?)\s+a\s+(?P<msg>.+?)\s+message\s+on\s+whatsapp\b",
-                r"\bsend\s+a\s+(?P<msg>.+?)\s+message\s+to\s+(?P<contact>[a-z0-9\s]+?)\s+on\s+whatsapp\b",
+                r"\bsend\s+(?P<contact>[a-z0-9\s]+?)\s+a\s+(?P<msg>.+?)\s+message(?:\s+on\s+whatsapp)?\b",
+                r"\bsend\s+(?:a\s+)?(?P<msg>.+?)\s+message\s+to\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)(?:\s+on\s+whatsapp)?$",
                 r"\b(?:message|text|whatsapp)\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)\s+on\s+whatsapp(?:\s+(?:saying|that|:)\s+(?P<msg>.+))?$",
                 r"\b(?P<read>read|check)\s+(?:my\s+)?whatsapp(?:\s+messages)?\b",
             ],
@@ -520,26 +603,6 @@ class IntentRouter:
             description="Initiate or prepare a phone call via wireless ADB bridge with contact resolution",
         )
 
-        # 16: Natural Personal Profile & Contact Teaching Statements
-        #     - "Remember that my name is Aditya Raj"
-        #     - "My Instagram is @bruprog"
-        #     - "My mobile number is +91 ..."
-        #     - "Arin is my friend, his number is ..."
-        #     - "Remember that Mom's WhatsApp number is ..."
-        #     - "Update Arin's Instagram to @..."
-        self.register(
-            name="personal_fact_statement",
-            priority=16,
-            patterns=[
-                r"^(?:remember\s+that\s+)?(?P<person>[a-zA-Z0-9]+)\s+is\s+my\s+(?P<rel>friend|best\s+friend|brother|sister|mother|father|mom|dad|colleague|cousin)(?:[\s,;]+(?:and\s+)?(?:his|her|their)\s+(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram)\s+is\s+(?P<val>.+))?$",
-                r"^(?:update|set|change|remember\s+that)\s+(?P<person2>[a-zA-Z0-9\s]+?)'s\s+(?P<attr2>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram(?:\s+username)?|birthday)\s+(?:to|is|as)\s+(?P<val2>.+)$",
-                r"^(?P<person3>[a-zA-Z0-9]+)'s\s+(?P<attr3>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram(?:\s+username)?|birthday)\s+is\s+(?P<val3>.+)$",
-                r"^(?:remember\s+that\s+)?(?:my\s+(?:full\s+name|name|nickname|mobile\s+number|phone\s+number|cell\s+number|mobile|phone|email(?:\s+address)?|instagram(?:\s+username|\s+handle|\s+id)?|birthday|date\s+of\s+birth|dob|age|home\s+address|address)|i\s+live\s+in)\s+(?:is\s+)?(?P<self_val>.+)$",
-            ],
-            handler=self._handle_personal_fact_statement,
-            description="Teach E.V. personal profile fields and contact details naturally by voice",
-        )
-
         # 28: Memory Store & Recall ("remember that X is Y", "what do you remember about X")
         self.register(
             name="memory_rag",
@@ -552,17 +615,17 @@ class IntentRouter:
             description="Save or recall persistent user facts in SQLite + ChromaDB",
         )
 
-        # 30: System Volume & Mute Controls
+        # 30: System Volume & Mute Controls (STRICT: requires 'volume', 'sound', 'audio', 'louder', or 'quieter')
         self.register(
             name="volume_control",
             priority=30,
             patterns=[
                 r"\b(?P<action>mute|unmute)\b(?:\s+(?:the\s+)?(?:audio|volume|sound|system))?",
-                r"\b(?:set\s+)?volume\s+(?:to\s+)?(?P<level>\d{1,3})\s*%?",
-                r"\b(?:turn\s+|volume\s+)?(?P<direction>up|down|louder|quieter|softer)\b(?:\s+(?:the\s+)?volume)?",
+                r"\b(?:set\s+)?(?:the\s+)?volume\s+(?:to\s+)?(?P<level>\d{1,3})\s*%?",
+                r"\b(?:turn\s+(?:the\s+)?(?:volume|sound|audio)\s+(?P<dir1>up|down)|(?:volume|sound|audio)\s+(?P<dir2>up|down|louder|quieter|softer)|turn\s+(?P<dir3>up|down)\s+(?:the\s+)?(?:volume|sound|audio)|make\s+(?:it|the\s+volume|the\s+sound)\s+(?P<dir4>louder|quieter|softer)|(?P<dir5>increase|decrease|raise|lower)\s+(?:the\s+)?(?:volume|sound|audio))\b",
             ],
             handler=self._handle_volume,
-            description="Adjust or mute system master audio volume",
+            description="Adjust or mute system master audio volume (never triggers on bare 'up')",
         )
 
         # 35: Media Playback Controls
@@ -654,7 +717,11 @@ class IntentRouter:
         return ""
 
     def _handle_continuous_listening(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
-        enable = not any(w in raw.lower() for w in ("disable", "turn off", "stop"))
+        gd = match.groupdict()
+        is_sleep = bool(gd.get("sleep")) or any(
+            w in raw.lower() for w in ("disable", "turn off", "stop", "sleep", "stand by", "standby", "pause")
+        )
+        enable = not is_sleep
         self.bus.publish(
             Topics.SETTINGS_CHANGED,
             {"key": "continuousListening", "value": enable},
@@ -662,10 +729,10 @@ class IntentRouter:
         )
         if enable:
             return (
-                "Continuous listening is active. You don't need to click the microphone — "
-                "just speak naturally, and you can interrupt me or say continue at any time."
+                "Continuous listening is active. You don't need to repeat Hey Evie — "
+                "just speak naturally, or say stop listening anytime."
             )
-        return "Continuous listening turned off. Say Hey E.V. whenever you need me."
+        return "Standing by. Say Hey Evie or double-clap whenever you need me."
 
     def _handle_personal_profile_query(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         field_q = (match.groupdict().get("field") or "").strip()
@@ -741,14 +808,15 @@ class IntentRouter:
         # 4. "Who is Arin?"
         if gd.get("who_person") and self.rag is not None:
             wp = gd["who_person"].strip()
-            # Guard against "Who is my creator" or "Who are you"
-            if wp.lower() in ("you", "ev", "e.v.", "your creator"):
+            if wp.lower() in ("you", "ev", "e.v.", "evie", "your creator"):
                 return self.brain.IDENTITY_RESPONSE if self.brain else "I am E.V."
             return self.rag.describe_person(wp)
 
         return "I couldn't find that contact in your database."
 
     def _handle_assistant_identity(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
+        if match.groupdict().get("checkin"):
+            return "Yes, I can hear you clearly. How can I help?"
         if self.brain is not None and hasattr(self.brain, "IDENTITY_RESPONSE"):
             return str(self.brain.IDENTITY_RESPONSE)
         return (
@@ -885,7 +953,6 @@ class IntentRouter:
                     f"You can tell me by saying '{resolved_name} is my friend, his number is ...'."
                 )
 
-        # If user said "Message Arin on WhatsApp" without specifying message body yet
         if not msg:
             if self.phone_adb is not None and resolved_number:
                 self.phone_adb.open_whatsapp_chat(resolved_number)
@@ -1028,7 +1095,14 @@ class IntentRouter:
         gd = match.groupdict()
         action = (gd.get("action") or "").lower()
         level_str = gd.get("level")
-        direction = (gd.get("direction") or "").lower()
+        direction = (
+            gd.get("dir1")
+            or gd.get("dir2")
+            or gd.get("dir3")
+            or gd.get("dir4")
+            or gd.get("dir5")
+            or ""
+        ).lower()
 
         if action in ("mute", "unmute"):
             mute_flag = action == "mute"
@@ -1042,7 +1116,7 @@ class IntentRouter:
                 self.system_ctrl.set_volume(lvl)
             return f"Volume set to {lvl} percent."
 
-        step = 10 if direction in ("up", "louder") else -10
+        step = 10 if direction in ("up", "louder", "increase", "raise") else -10
         if self.system_ctrl is not None:
             self.system_ctrl.adjust_volume(step)
         return "Volume increased." if step > 0 else "Volume decreased."
