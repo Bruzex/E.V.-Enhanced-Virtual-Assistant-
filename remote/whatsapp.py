@@ -60,11 +60,13 @@ class WhatsAppController:
         base_dir: Path,
         event_bus: Optional[EventBus] = None,
         tts: Optional[Any] = None,
+        rag: Optional[Any] = None,
     ) -> None:
         self.config = config
         self.base_dir = base_dir
         self.bus = event_bus or get_event_bus()
         self.tts = tts
+        self.rag = rag
         self.logger = logging.getLogger("ev.whatsapp")
 
         wa_cfg = config.get("remote", {}).get("whatsapp", {})
@@ -154,12 +156,26 @@ class WhatsAppController:
     # =========================================================================
     # Messaging & Voice Note Actions
     # =========================================================================
-    def send_message(self, contact_name: str, message: str) -> Tuple[bool, str]:
-        """Send a WhatsApp text message to `contact_name`."""
+    def set_rag(self, rag: Any) -> None:
+        """Attach the RAGMemoryManager so WhatsAppController resolves contacts from SQLite."""
+        self.rag = rag
+
+    def send_message(self, contact_name: str, message: str, phone_number: str = "") -> Tuple[bool, str]:
+        """
+        Send a WhatsApp text message to `contact_name`, resolving their stored
+        name/WhatsApp number from the SQLite `contacts` database when available.
+        """
         contact = (contact_name or "").strip()
         body = (message or "").strip()
         if not contact or not body:
             return False, "Please specify both a WhatsApp contact and message."
+
+        resolved_number = phone_number.strip()
+        if self.rag is not None and hasattr(self.rag, "get_contact"):
+            rec = self.rag.get_contact(contact)
+            if rec is not None:
+                contact = rec.name
+                resolved_number = resolved_number or rec.whatsapp or rec.phone
 
         if not self.enabled or not self.ensure_session() or self._driver is None:
             self.logger.info(

@@ -2,7 +2,7 @@
 
 **100% Offline • Strict CPU-Only (`n_gpu_layers=0`) • ≤ 4.0 GB Peak RAM • Dark Holographic HUD**
 
-E.V. (Enhanced Virtual Assistant) is a local-first, voice-driven desktop AI assistant inspired by Iron Man's JARVIS and the Jarvis AI Spark project, engineered specifically for constrained hardware (**MSI Bravo 15** with 16 GB RAM and AMD Radeon RX 6500M).
+E.V. (Enhanced Virtual Assistant) is a local-first, voice-driven desktop AI assistant inspired by Iron Man's JARVIS and Spider-Man's E.V. (Enhanced Virtual Assistant), engineered specifically for constrained hardware (**MSI Bravo 15** with 16 GB RAM and AMD Radeon RX 6500M).
 
 ---
 

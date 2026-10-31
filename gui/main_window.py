@@ -32,6 +32,7 @@ try:
         QMouseEvent,
         QPainter,
         QPen,
+        QPixmap,
         QRadialGradient,
     )
     from PyQt6.QtWidgets import (
@@ -188,6 +189,7 @@ class EVMainWindow(QMainWindow):
         self.ram_history: List[float] = [2.3 + random.random() * 0.12 for _ in range(28)]
 
         self._t0 = time.monotonic()
+        self._bg_cache: Optional[QPixmap] = None
         self.particles: List[Particle] = []
         self.sparks: List[SparkBurst] = []
         self._init_particles(int(gui_cfg.get("particle_density", 70)))
@@ -556,6 +558,7 @@ class EVMainWindow(QMainWindow):
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
+        self._bg_cache = None
         self._reposition_overlays()
 
     # =========================================================================
@@ -815,6 +818,7 @@ class EVMainWindow(QMainWindow):
         if key in self.settings:
             self.settings[key] = not self.settings[key]
             self.orb_widget.minimal_ui = self.settings["minimalUi"]
+            self._bg_cache = None
             self.settings_popover.sync_state(self.settings, self._preview_orb_state)
             self._refresh_orb_and_readout()
             self.setting_changed.emit(key, self.settings[key])
@@ -938,6 +942,49 @@ class EVMainWindow(QMainWindow):
                 return
         super().keyPressEvent(event)
 
+    def _ensure_background_cache(self, w: int, h: int, minimal: bool) -> QPixmap:
+        """Render the static holographic grid, CRT scanlines, and vignette into a cached QPixmap once per resize."""
+        if (
+            self._bg_cache is not None
+            and self._bg_cache.width() == w
+            and self._bg_cache.height() == h
+        ):
+            return self._bg_cache
+
+        pix = QPixmap(max(1, w), max(1, h))
+        pix.fill(COLOR_BG)
+        bp = QPainter(pix)
+
+        if self.show_grid:
+            bp.setPen(QPen(QColor(0, 212, 255, 13), 1.0))
+            for x in range(0, w, 48):
+                bp.drawLine(x, 0, x, h)
+            for y in range(0, h, 48):
+                bp.drawLine(0, y, w, y)
+
+            bp.setPen(QPen(QColor(0, 212, 255, 24), 1.0))
+            for x in range(0, w, 240):
+                bp.drawLine(x, 0, x, h)
+            for y in range(0, h, 240):
+                bp.drawLine(0, y, w, y)
+
+        if self.scanlines and not minimal:
+            bp.setPen(QPen(QColor(0, 0, 0, 50), 1.0))
+            for y in range(0, h, 4):
+                bp.drawLine(0, y, w, y)
+
+        vignette = QRadialGradient(QPointF(w / 2.0, h / 2.0), max(w, h) * 0.72)
+        vignette.setColorAt(0.0, QColor(0, 0, 0, 0))
+        vignette.setColorAt(0.7, QColor(0, 0, 0, 60))
+        vignette.setColorAt(1.0, QColor(0, 0, 0, 195))
+        bp.setPen(no_pen())
+        bp.setBrush(QBrush(vignette))
+        bp.drawRect(0, 0, w, h)
+        bp.end()
+
+        self._bg_cache = pix
+        return pix
+
     def paintEvent(self, event: Any) -> None:
         painter = QPainter(self)
         painter.setRenderHint(antialias_hint())
@@ -947,23 +994,11 @@ class EVMainWindow(QMainWindow):
         minimal = self.settings.get("minimalUi", False)
         t = time.monotonic() - self._t0
 
-        painter.fillRect(0, 0, w, h, COLOR_BG)
+        # 1. Blit pre-rendered static background (grid + scanlines + radial vignette) in O(1)
+        bg_pix = self._ensure_background_cache(w, h, minimal)
+        painter.drawPixmap(0, 0, bg_pix)
 
-        if self.show_grid:
-            minor_pen = QPen(QColor(0, 212, 255, 13), 1.0)
-            painter.setPen(minor_pen)
-            for x in range(0, w, 48):
-                painter.drawLine(x, 0, x, h)
-            for y in range(0, h, 48):
-                painter.drawLine(0, y, w, y)
-
-            major_pen = QPen(QColor(0, 212, 255, 24), 1.0)
-            painter.setPen(major_pen)
-            for x in range(0, w, 240):
-                painter.drawLine(x, 0, x, h)
-            for y in range(0, h, 240):
-                painter.drawLine(0, y, w, y)
-
+        # 2. Draw drifting particles
         if self.show_particles and not minimal:
             painter.setPen(no_pen())
             for p in self.particles:
@@ -973,23 +1008,11 @@ class EVMainWindow(QMainWindow):
                 painter.setBrush(QBrush(col))
                 painter.drawEllipse(QPointF(p.x, p.y), p.r, p.r)
 
+        # 3. Single moving sweep line
         if self.scanlines and not minimal:
-            scan_pen = QPen(QColor(0, 0, 0, 55), 1.0)
-            painter.setPen(scan_pen)
-            for y in range(0, h, 4):
-                painter.drawLine(0, y, w, y)
-
             sweep_y = int(((t % 9.0) / 9.0) * h)
             painter.setPen(QPen(QColor(0, 212, 255, 45), 1.2))
             painter.drawLine(0, sweep_y, w, sweep_y)
-
-        vignette = QRadialGradient(QPointF(w / 2.0, h / 2.0), max(w, h) * 0.72)
-        vignette.setColorAt(0.0, QColor(0, 0, 0, 0))
-        vignette.setColorAt(0.7, QColor(0, 0, 0, 60))
-        vignette.setColorAt(1.0, QColor(0, 0, 0, 195))
-        painter.setPen(no_pen())
-        painter.setBrush(QBrush(vignette))
-        painter.drawRect(0, 0, w, h)
 
         if self.sparks and not minimal:
             now_ms = time.monotonic() * 1000.0

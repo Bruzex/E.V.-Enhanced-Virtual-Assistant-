@@ -15,7 +15,8 @@ llama-cpp-python>=0.2.90
 # --- Offline Speech-to-Text (Vosk), Text-to-Speech (Piper) & Audio I/O ---
 vosk>=0.3.45
 piper-tts>=1.2.0
-PyAudio>=0.2.14
+# PyAudio is optional; E.V. uses sounddevice + winsound (zero C++ compilation required on Windows)
+# PyAudio>=0.2.14
 sounddevice>=0.4.6
 
 # --- Holographic Desktop GUI (PyQt6 primary, PyQt5 supported fallback) ---

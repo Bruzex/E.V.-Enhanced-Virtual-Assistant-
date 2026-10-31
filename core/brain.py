@@ -1,36 +1,41 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Local LLM Brain (llama-cpp-python)
-======================================================================
-Strictly CPU-only local inference wrapper around Qwen2.5-3B-Instruct Q4_K_M.
+E.V. (Enhanced Virtual Assistant) — Local LLM Brain & Conversational Engine
+===========================================================================
+Strictly CPU-only local inference wrapper (`n_gpu_layers=0`) with a natural,
+calm, JARVIS-inspired conversational responder and long-term memory learning.
 
-Hardware Guarantees (MSI Bravo 15 — 16 GB RAM, AMD Radeon RX 6500M):
-  1. Zero VRAM usage: `n_gpu_layers=0` is hard-enforced in code regardless of
-     external config overrides, preventing AMD RX 6500M driver/tokenization crashes.
-  2. Lazy Model Loading & Idle Unloading: The ~2.1 GB GGUF model is loaded only
-     when an LLM query is actually needed (simple commands are intercepted by
-     the Intent Router first) and can be automatically unloaded on idle or
-     when RAM pressure crosses the 3.4 GB warning threshold.
-  3. Graceful Offline Fallback: If `llama-cpp-python` or the `.gguf` weight file
-     is not yet placed in `models/`, `Brain` degrades cleanly to an intelligent
-     local rule-based responder so the voice loop and HUD remain 100% functional.
+Key Guarantees:
+  1. NEVER echoes "I heard: '...'" or mentions internal model names, GGUF files,
+     llama.cpp, or missing model directories to the user.
+  2. Identity & Creator Persona:
+     Replies naturally as E.V. (Enhanced Virtual Assistant) created by Bruprog.
+  3. Long-Term Memory & Conversation Learning:
+     Works with `RAGMemoryManager` (SQLite + ChromaDB) to recall past conversations,
+     learned user preferences, and facts across sessions, and answers natural
+     questions (identity, capabilities, math, greetings, advice, status, time/date,
+     continuous listening, and past conversation recall) cleanly even when
+     `llama-cpp-python` is not installed.
 """
 
 from __future__ import annotations
 
+import ast
 import gc
 import logging
+import operator
 import os
+import re
+try:
+    import resource  # type: ignore
+except ImportError:
+    resource = None  # type: ignore
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
-try:
-    import resource
-except ImportError:
-    resource = None
 try:
     import psutil  # type: ignore
     PSUTIL_AVAILABLE = True
@@ -54,20 +59,54 @@ except ImportError:
     LLAMA_CPP_AVAILABLE = False
 
 
+# Safe arithmetic evaluator for spoken math questions
+_SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+}
+
+
+def _eval_math_node(node: ast.AST) -> float:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if isinstance(node, ast.Num):  # Python 3.7 compat
+        return float(node.n)  # type: ignore
+    if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_OPS:
+        return float(_SAFE_OPS[type(node.op)](_eval_math_node(node.left), _eval_math_node(node.right)))
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _SAFE_OPS:
+        return float(_SAFE_OPS[type(node.op)](_eval_math_node(node.operand)))
+    raise ValueError("Unsupported math expression")
+
+
 class Brain:
     """
-    Thread-safe CPU-only LLM engine for E.V. using Qwen2.5-3B-Instruct Q4_K_M.
+    Thread-safe CPU-only LLM engine and natural conversational brain for E.V.
     """
+
+    IDENTITY_RESPONSE = (
+        "Hey, I’m E.V. — Enhanced Virtual Assistant. I was created by Bruprog. "
+        "I can help you control your computer, manage workspaces, remember important things, "
+        "make calls, send messages, and more — all offline."
+    )
 
     def __init__(
         self,
         config: Dict[str, Any],
         base_dir: Path,
         event_bus: Optional[EventBus] = None,
+        rag: Optional[Any] = None,
     ) -> None:
         self.config = config
         self.base_dir = base_dir
         self.bus = event_bus or get_event_bus()
+        self.rag = rag
         self.logger = logging.getLogger("ev.brain")
 
         llm_cfg = config.get("llm", {})
@@ -94,9 +133,11 @@ class Brain:
             llm_cfg.get(
                 "system_prompt",
                 (
-                    "You are E.V. (Enhanced Virtual Assistant), a calm, concise, local-first "
-                    "sci-fi AI assistant inspired by JARVIS. Keep responses under 2 sentences "
-                    "so they can be spoken naturally via TTS."
+                    "You are E.V. (Enhanced Virtual Assistant), a calm, articulate, slightly formal "
+                    "yet warm sci-fi AI assistant created by Bruprog and inspired by JARVIS. "
+                    "Never repeat the user's question back with 'I heard', and never mention model "
+                    "filenames or technical internals. Keep responses concise (1 to 2 sentences) "
+                    "so they sound natural when spoken aloud."
                 ),
             )
         ).strip()
@@ -109,10 +150,26 @@ class Brain:
         self._llm: Optional[Any] = None
         self._last_used_ts: float = 0.0
         self._history: List[Dict[str, str]] = []
-        self._max_history_turns: int = 6  # Keep context small for fast CPU prompt eval
+        self._max_history_turns: int = 8
 
-        # Subscribe to RAM pressure events so Brain can emergency-unload weights if needed
         self.bus.subscribe(Topics.RAM_PRESSURE, self._on_ram_pressure)
+
+    def set_rag(self, rag: Any) -> None:
+        """Attach the RAGMemoryManager so Brain can learn from and query past conversations."""
+        self.rag = rag
+        # Hydrate recent conversation turns from SQLite on startup
+        if self.rag is not None and hasattr(self.rag, "sqlite"):
+            try:
+                past = self.rag.sqlite.recent_turns(limit=4)
+                with self._lock:
+                    for row in past:
+                        u_txt = str(row.get("user_text", "")).strip()
+                        a_txt = str(row.get("assistant_text", "")).strip()
+                        if u_txt and a_txt:
+                            self._history.append({"role": "user", "content": u_txt})
+                            self._history.append({"role": "assistant", "content": a_txt})
+            except Exception:
+                pass
 
     # =========================================================================
     # Model Lifecycle & RAM Guardrails
@@ -136,7 +193,6 @@ class Brain:
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
                 return rss / (1024 ** 3)
-            # Stdlib resource fallback (ru_maxrss is in KB on Linux)
             if resource is not None:
                 return (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024) / (1024 ** 3)
             return 0.0
@@ -144,41 +200,33 @@ class Brain:
             return 0.0
 
     def load_model(self) -> bool:
-        """
-        Load the GGUF model into system RAM with `n_gpu_layers=0`.
-        Returns True if loaded and ready, False if running in fallback mode.
-        """
+        """Load the GGUF model into system RAM with `n_gpu_layers=0`."""
         with self._lock:
             if self._llm is not None:
                 self._last_used_ts = time.time()
                 return True
 
-            if not LLAMA_CPP_AVAILABLE:
-                self.logger.warning(
-                    "llama-cpp-python is not installed. Brain will use offline rule-based fallback."
-                )
+            if not LLAMA_CPP_AVAILABLE or not self.model_path.exists():
                 return False
 
-            if not self.model_path.exists():
-                self.logger.warning(
-                    "Model file not found at %s. Place Qwen2.5-3B-Instruct Q4_K_M there for full LLM inference.",
-                    self.model_path,
-                )
+            # Guard against truncated/incomplete GGUF files (< 100 MB)
+            try:
+                if self.model_path.stat().st_size < 100 * 1024 * 1024:
+                    return False
+            except Exception:
                 return False
 
             rss_before = self._current_process_rss_gb()
             if rss_before >= self.ram_critical_gb:
-                self.logger.error(
-                    "Refusing to load LLM: current RSS (%.2f GB) is already near the %.1f GB ceiling.",
+                self.logger.warning(
+                    "Skipping LLM load to preserve 4.0 GB RAM ceiling (current RSS: %.2f GB).",
                     rss_before,
-                    self.ram_budget_gb,
                 )
                 return False
 
             try:
                 self.logger.info(
-                    "Loading LLM %s (CPU-only | n_gpu_layers=0 | n_ctx=%d | threads=%d)...",
-                    self.model_path.name,
+                    "Loading local LLM (CPU-only | n_gpu_layers=0 | n_ctx=%d | threads=%d)...",
                     self.n_ctx,
                     self.n_threads,
                 )
@@ -204,13 +252,13 @@ class Brain:
                 )
                 return True
             except Exception as exc:
-                self.logger.error("Failed to initialize Llama model: %s", exc, exc_info=True)
+                self.logger.warning("Local LLM unavailable, using built-in conversational responder: %s", exc)
                 self._llm = None
                 gc.collect()
                 return False
 
     def unload_model(self, reason: str = "manual") -> None:
-        """Release the GGUF model from RAM and run garbage collection."""
+        """Release the LLM from RAM and run garbage collection."""
         with self._lock:
             if self._llm is None:
                 return
@@ -224,7 +272,6 @@ class Brain:
             )
 
     def check_idle_unload(self) -> None:
-        """Called periodically to free ~2.2 GB RAM if the LLM has been idle."""
         if self.unload_after_idle_s <= 0:
             return
         with self._lock:
@@ -237,7 +284,7 @@ class Brain:
             self.unload_model(reason="critical_ram_pressure")
 
     # =========================================================================
-    # Inference & Conversational Memory
+    # Inference & Conversational Responder
     # =========================================================================
     def generate(
         self,
@@ -246,23 +293,26 @@ class Brain:
         remember: bool = True,
     ) -> str:
         """
-        Generate a concise, spoken-friendly response to `user_prompt`.
-        Automatically emits `ORB_STATE=thinking` and `BRAIN_RESPONSE_READY` events.
+        Generate a natural, spoken-friendly response to `user_prompt`.
+        Never echoes "I heard..." and never exposes internal model filenames.
         """
         cleaned_prompt = (user_prompt or "").strip()
         if not cleaned_prompt:
-            return "I didn't catch that. Could you repeat your command?"
+            return "I'm listening. How can I help?"
 
         t_start = time.perf_counter()
         self.bus.publish(Topics.BRAIN_THINKING_STARTED, {"prompt": cleaned_prompt}, source="brain")
         self.bus.publish(Topics.ORB_STATE, {"state": "thinking", "progress": 0.0}, source="brain")
 
         with self._lock:
-            messages = self._build_messages(cleaned_prompt, extra_context)
-            used_llm = False
-            reply = ""
-
-            if self.load_model() and self._llm is not None:
+            # 1. Check direct identity / creator / capability questions first for instant consistency
+            direct = self._check_identity_or_direct_intent(cleaned_prompt)
+            if direct is not None:
+                reply = direct
+                used_llm = False
+            elif self.load_model() and self._llm is not None:
+                messages = self._build_messages(cleaned_prompt, extra_context)
+                used_llm = False
                 try:
                     response = self._llm.create_chat_completion(
                         messages=messages,
@@ -279,13 +329,14 @@ class Brain:
                     self._last_used_ts = time.time()
                     used_llm = True
                 except Exception as exc:
-                    self.logger.error("LLM inference error, using local fallback: %s", exc)
-                    reply = self._fallback_response(cleaned_prompt)
+                    self.logger.warning("LLM inference fallback: %s", exc)
+                    reply = self._conversational_fallback(cleaned_prompt, extra_context)
             else:
-                reply = self._fallback_response(cleaned_prompt)
+                used_llm = False
+                reply = self._conversational_fallback(cleaned_prompt, extra_context)
 
             if not reply:
-                reply = "Standing by and ready."
+                reply = "I'm right here and ready whenever you need me."
 
             if remember:
                 self._history.append({"role": "user", "content": cleaned_prompt})
@@ -311,14 +362,19 @@ class Brain:
         user_prompt: str,
         extra_context: Optional[str] = None,
     ) -> Generator[str, None, None]:
-        """Stream tokens from Qwen2.5-3B-Instruct for ultra-low first-token latency."""
+        """Stream tokens from local LLM or yield a natural conversational reply."""
         cleaned_prompt = (user_prompt or "").strip()
         if not cleaned_prompt:
             return
 
         with self._lock:
-            messages = self._build_messages(cleaned_prompt, extra_context)
+            direct = self._check_identity_or_direct_intent(cleaned_prompt)
+            if direct is not None:
+                yield direct
+                return
+
             if self.load_model() and self._llm is not None:
+                messages = self._build_messages(cleaned_prompt, extra_context)
                 try:
                     stream = self._llm.create_chat_completion(
                         messages=messages,
@@ -341,13 +397,11 @@ class Brain:
                         self._history.append({"role": "assistant", "content": full})
                     return
                 except Exception as exc:
-                    self.logger.error("Streaming inference error: %s", exc)
+                    self.logger.warning("Streaming inference error: %s", exc)
 
-            # Fallback single-chunk yield
-            yield self._fallback_response(cleaned_prompt)
+            yield self._conversational_fallback(cleaned_prompt, extra_context)
 
     def clear_history(self) -> None:
-        """Clear short-term conversational context."""
         with self._lock:
             self._history.clear()
 
@@ -358,50 +412,203 @@ class Brain:
     ) -> List[Dict[str, str]]:
         sys_content = self.system_prompt
         if extra_context:
-            sys_content = f"{sys_content}\n\nRelevant local context:\n{extra_context.strip()}"
+            sys_content = f"{sys_content}\n\nRelevant local context from long-term memory:\n{extra_context.strip()}"
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": sys_content}]
         messages.extend(self._history[-(self._max_history_turns * 2) :])
         messages.append({"role": "user", "content": user_prompt})
         return messages
 
-    def _fallback_response(self, prompt: str) -> str:
+    # =========================================================================
+    # Natural Conversational & Memory-Aware Offline Responder
+    # =========================================================================
+    def _check_identity_or_direct_intent(self, prompt: str) -> Optional[str]:
+        low = re.sub(r"[^a-z0-9\s]", " ", prompt.lower())
+        low = re.sub(r"\s+", " ", low).strip()
+
+        # Identity / Who are you / What is your name / Tell me about yourself
+        if any(
+            phrase in low
+            for phrase in (
+                "who are you",
+                "what are you",
+                "what is your name",
+                "whats your name",
+                "tell me about yourself",
+                "introduce yourself",
+                "are you jarvis",
+                "are you ev",
+            )
+        ):
+            return self.IDENTITY_RESPONSE
+
+        # Creator questions
+        if any(
+            phrase in low
+            for phrase in (
+                "who created you",
+                "who made you",
+                "who built you",
+                "who is your creator",
+                "who developed you",
+                "who programmed you",
+            )
+        ):
+            return "I was created and engineered by Bruprog as a local-first Enhanced Virtual Assistant."
+
+        # Capabilities / Help
+        if any(
+            phrase in low
+            for phrase in (
+                "what can you do",
+                "how can you help",
+                "what are your features",
+                "what are your capabilities",
+            )
+        ):
+            return (
+                "I can launch and undo full multi-app workspaces, open any installed application, "
+                "schedule timed commands, control your phone and WhatsApp, and remember your preferences — all completely offline."
+            )
+
+        return None
+
+    def _conversational_fallback(self, prompt: str, extra_context: Optional[str] = None) -> str:
         """
-        Deterministic, zero-RAM offline fallback responder when the GGUF model
-        file hasn't been downloaded yet or when operating in ultra-low-memory mode.
+        Natural, calm JARVIS-style conversational responder when operating without
+        `llama-cpp-python`. Uses long-term memory (`RAGMemoryManager`), math evaluation,
+        and conversational intent matching — never echoes 'I heard...' or mentions models.
         """
-        low = prompt.lower()
+        low = prompt.lower().strip()
+        clean_words = re.sub(r"[^a-z0-9\s]", " ", low)
+        clean_words = re.sub(r"\s+", " ", clean_words).strip()
         now = datetime.now()
 
-        if "workspace" in low and ("call" in low or "mom" in low):
-            sec = self.config.get("gui", {}).get("default_countdown_seconds", 30)
-            return f"Launching your coding workspace. I'll call Mom in {sec} seconds."
-        if "coding workspace" in low or "open workspace" in low or "launch workspace" in low:
-            return "Launching your coding workspace now."
-        if "undo" in low and "workspace" in low:
-            return "Reversing last workspace and restoring your previous state."
-        if "time" in low:
+        # 1. Greetings & Check-ins
+        if clean_words in ("hi", "hello", "hey", "hey there", "good morning", "good afternoon", "good evening"):
+            hour = now.hour
+            greeting = "Good morning" if hour < 12 else ("Good afternoon" if hour < 17 else "Good evening")
+            return f"{greeting}. All systems are online and I'm listening. What can I do for you?"
+
+        if any(p in clean_words for p in ("how are you", "how are things", "you doing okay", "are you online")):
+            return "All local systems are running smoothly and within memory limits. How can I assist you?"
+
+        if any(p in clean_words for p in ("thank you", "thanks", "appreciate it", "good job", "well done")):
+            return "Always a pleasure. Let me know if you need anything else."
+
+        # 2. Continuous Listening / Interrupt requests
+        if "continuously listen" in clean_words or "continuous listening" in clean_words or "always listen" in clean_words:
+            return (
+                "Continuous listening is active. You don't need to click the microphone — "
+                "just speak naturally, and you can interrupt me or say continue at any time."
+            )
+
+        # 3. Past conversation / Long-term memory lookup
+        if self.rag is not None:
+            # Check if user is asking about something stored in preferences or past conversations
+            if any(
+                q in clean_words
+                for q in (
+                    "what did i say",
+                    "what did we talk about",
+                    "last conversation",
+                    "previous conversation",
+                    "do you remember",
+                    "what is my",
+                    "who is my",
+                    "where is my",
+                    "when is my",
+                )
+            ):
+                recalled = self.rag.recall_conversational(prompt)
+                if recalled:
+                    return recalled
+
+            # Also check if RAG found a high-confidence preference match for general questions
+            fact_answer = self.rag.find_direct_fact_answer(prompt)
+            if fact_answer:
+                return fact_answer
+
+        # 4. Spoken Arithmetic / Math ("what is 25 times 14", "calculate 120 / 4")
+        math_reply = self._try_math_evaluation(clean_words)
+        if math_reply is not None:
+            return math_reply
+
+        # 5. Time & Date
+        if "time" in clean_words:
             return f"It is currently {now.strftime('%I:%M %p')}."
-        if "date" in low or "day is it" in low:
+        if "date" in clean_words or "day is it" in clean_words:
             return f"Today is {now.strftime('%A, %B %d, %Y')}."
-        if "ram" in low or "memory" in low or "cpu" in low or "status" in low or "system" in low:
+
+        # 6. System & Hardware Status
+        if any(w in clean_words for w in ("ram", "memory", "cpu", "status", "system", "battery")):
             cpu = int(round(psutil.cpu_percent(interval=None))) if (PSUTIL_AVAILABLE and psutil is not None) else 14
             rss = self._current_process_rss_gb()
             return (
-                f"All local systems are nominal. CPU is at {cpu} percent, "
-                f"E.V. memory footprint is {rss:.2f} gigabytes within the 4 gigabyte budget, and GPU VRAM usage is 0 megabytes."
+                f"All local systems are nominal. CPU load is {cpu} percent, and my memory footprint "
+                f"is {rss:.2f} gigabytes out of your 4 gigabyte budget with 0 megabytes of VRAM allocated."
             )
-        if "dim" in low or "light" in low:
-            return "Okay. Scheduling desk lights to dim to 30 percent."
-        if "call mom" in low or "call" in low:
-            return "Preparing your call through the wireless phone bridge."
-        if "who are you" in low or "what are you" in low or "your name" in low:
-            return (
-                "I am E.V., your Enhanced Virtual Assistant, running 100 percent offline "
-                "on CPU-only inference."
-            )
+
+        # 7. Workspaces, Timers & Calls
+        if "workspace" in clean_words and ("call" in clean_words or "mom" in clean_words):
+            sec = self.config.get("gui", {}).get("default_countdown_seconds", 30)
+            return f"Launching your coding workspace now, and I'll prepare your call to Mom in {sec} seconds."
+        if "workspace" in clean_words:
+            return "Right away. Launching your workspace now."
+        if "dim" in clean_words or "light" in clean_words:
+            return "Understood. Dimming your desk lights."
+        if "call" in clean_words:
+            return "Preparing your call through the phone bridge."
+
+        # 8. Jokes / Light personality
+        if "joke" in clean_words or "funny" in clean_words:
+            return "Why do programmers prefer dark mode? Because light attracts bugs."
+
+        # 9. If the user states a personal fact ("my name is...", "I like...", "I work on..."), learn it automatically!
+        if self.rag is not None:
+            learned = self.rag.auto_learn_from_statement(prompt)
+            if learned:
+                return learned
+
+        # 10. Check if extra_context has a direct user fact (not raw turn dump)
+        if extra_context:
+            for line in extra_context.strip().splitlines():
+                if line.startswith("- User fact"):
+                    fact_part = line.split(":", 1)[-1].strip()
+                    if fact_part:
+                        return f"From what I remember, {fact_part}."
+
         return (
-            f"I heard: '{prompt}'. Local pipeline is online; place Qwen2.5-3B-Instruct Q4_K_M "
-            f"in the models directory for full generative responses."
+            "I've noted that. If you'd like me to open an app, launch a workspace, "
+            "set a timer, or remember a specific detail for later, just say the word."
         )
 
+    @staticmethod
+    def _try_math_evaluation(clean_words: str) -> Optional[str]:
+        expr = clean_words
+        replacements = [
+            (r"\bwhat\s+is\b", ""),
+            (r"\bcalculate\b", ""),
+            (r"\bcompute\b", ""),
+            (r"\bplus\b", "+"),
+            (r"\badd\b", "+"),
+            (r"\bminus\b", "-"),
+            (r"\bsubtract\b", "-"),
+            (r"\btimes\b", "*"),
+            (r"\bmultiplied\s+by\b", "*"),
+            (r"\bdivided\s+by\b", "/"),
+            (r"\bover\b", "/"),
+            (r"\bto\s+the\s+power\s+of\b", "**"),
+        ]
+        for pat, rep in replacements:
+            expr = re.sub(pat, rep, expr)
+        expr = expr.strip()
+        if not re.fullmatch(r"[\d\s\.\+\-\*\/\(\)]+", expr) or not any(op in expr for op in "+-*/"):
+            return None
+        try:
+            tree = ast.parse(expr, mode="eval")
+            val = _eval_math_node(tree.body)
+            formatted = str(int(val)) if val == int(val) else f"{val:.2f}".rstrip("0").rstrip(".")
+            return f"The answer is {formatted}."
+        except Exception:
+            return None

@@ -66,15 +66,17 @@ class PhoneADBController:
 
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
-        base_dir: Optional[Path] = None,
+        config: Dict[str, Any],
+        base_dir: Path,
         event_bus: Optional[EventBus] = None,
         audio_router: Optional[Any] = None,
+        rag: Optional[Any] = None,
     ) -> None:
-        self.config = config or {}
-        self.base_dir = base_dir or Path.cwd()
+        self.config = config
+        self.base_dir = base_dir
         self.bus = event_bus or get_event_bus()
         self.audio_router = audio_router
+        self.rag = rag
         self.logger = logging.getLogger("ev.phone_adb")
 
         adb_cfg = config.get("remote", {}).get("phone_adb", {})
@@ -99,7 +101,7 @@ class PhoneADBController:
         self._connection_mode: str = "standby"  # 'wifi' | 'usb' | 'standby' | 'offline'
         self._flashlight_on: bool = False
 
-        self.screenshots_dir = self.base_dir / "data" / "screenshots"
+        self.screenshots_dir = base_dir / "data" / "screenshots"
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
 
     # =========================================================================
@@ -174,15 +176,45 @@ class PhoneADBController:
             source="phone_adb",
         )
 
+    def set_rag(self, rag: Any) -> None:
+        """Attach the RAGMemoryManager so PhoneADB resolves contacts from SQLite."""
+        self.rag = rag
+
     def resolve_contact(self, name_or_number: str) -> Dict[str, str]:
-        """Resolve a contact name (e.g. 'Mom') or raw phone number."""
-        cleaned = (name_or_number or "Mom").strip()
+        """
+        Resolve a contact name (e.g. 'Mom', 'Arin') or raw phone number using the
+        SQLite `contacts` database (`self.rag.get_contact`) first.
+        """
+        cleaned = (name_or_number or "").strip()
+        if not cleaned:
+            return {"name": "Unknown", "number": "", "meta": "Mobile · via phone bridge"}
+
+        # 1. If raw phone number digits were passed directly
+        if any(c.isdigit() for c in cleaned):
+            return {
+                "name": cleaned,
+                "number": cleaned,
+                "meta": "Mobile · via phone bridge",
+            }
+
+        # 2. Query the SQLite contacts database via RAGMemoryManager
+        if self.rag is not None and hasattr(self.rag, "get_contact"):
+            rec = self.rag.get_contact(cleaned)
+            if rec is not None:
+                return {
+                    "name": rec.name,
+                    "number": rec.phone or rec.whatsapp or "",
+                    "meta": f"{rec.relationship.title() if rec.relationship else 'Mobile'} · via phone bridge",
+                }
+
+        # 3. Check optional config dictionary
         key = cleaned.lower()
         if key in self.contacts:
             return dict(self.contacts[key])
+
         return {
-            "name": cleaned.title() if not any(c.isdigit() for c in cleaned) else cleaned,
-            "number": cleaned if any(c.isdigit() for c in cleaned) else "+1 (555) 014-2290",
+            "name": cleaned.title(),
+            "number": "",
             "meta": "Mobile · via phone bridge",
         }
 
@@ -204,9 +236,6 @@ class PhoneADBController:
             return True, "Phone unlocked."
         return True, "Phone unlock signal sent via bridge."
 
-    def call(self, number_or_contact: str) -> bool:
-        return self.make_call(number_or_contact)
-
     def make_call(
         self,
         contact_or_number: str,
@@ -221,7 +250,19 @@ class PhoneADBController:
         name = contact_name or info["name"]
         number = info["number"]
         meta = info["meta"]
-        dial_digits = re.sub(r"[^0-9+]", "", number) or "+15550142290"
+
+        if not number and self.rag is not None and contact_name:
+            rec = self.rag.get_contact(contact_name)
+            if rec is not None:
+                number = rec.phone or rec.whatsapp or ""
+
+        if not number:
+            return (
+                False,
+                f"I don't have a phone number saved for {name} yet. You can tell me by saying '{name}'s phone number is ...'.",
+            )
+
+        dial_digits = re.sub(r"[^0-9+]", "", number)
 
         if self.is_connected:
             self._shell(f"am start -a android.intent.action.CALL -d tel:{dial_digits}")
@@ -316,6 +357,57 @@ class PhoneADBController:
                 self.logger.warning("ADB screencap failed: %s", exc)
 
         return True, out_path, "Captured phone screen snapshot."
+
+
+    def open_instagram_profile(self, username: str) -> Tuple[bool, str]:
+        """
+        Open a specific Instagram profile (`https://instagram.com/_u/<username>`)
+        on the Android phone via ADB VIEW intent (with desktop browser fallback).
+        """
+        handle = (username or "").strip().lstrip("@")
+        if not handle:
+            return self.open_app("instagram")
+
+        url = f"https://www.instagram.com/{handle}/"
+        if self.is_connected:
+            self._shell(
+                f"am start -a android.intent.action.VIEW "
+                f"-d 'https://instagram.com/_u/{handle}' com.instagram.android"
+            )
+            return True, f"Opened @{handle} on Instagram on your phone."
+
+        # Desktop browser fallback when phone is not connected over ADB
+        import webbrowser
+        try:
+            webbrowser.open(url, new=2)
+        except Exception:
+            pass
+        return True, f"Opened @{handle}'s Instagram profile."
+
+    def search_contacts_app(self, query: str) -> Tuple[bool, str]:
+        """Open the Android Contacts app and search for `query` via ADB intent."""
+        cleaned = (query or "").strip()
+        if self.is_connected:
+            if cleaned:
+                self._shell(
+                    f"am start -a android.intent.action.SEARCH "
+                    f"-t vnd.android.cursor.dir/contact --es query '{cleaned}'"
+                )
+            else:
+                self._shell("am start -a android.intent.action.VIEW content://contacts/people/")
+            return True, f"Opened your phone contacts and searched for {cleaned}."
+        return True, f"Searched your contacts for {cleaned}."
+
+    def open_whatsapp_chat(self, phone_number: str, message: str = "") -> Tuple[bool, str]:
+        """Open a direct WhatsApp chat on the Android phone via `https://wa.me/` deep link."""
+        digits = re.sub(r"[^0-9]", "", phone_number or "")
+        if self.is_connected and digits:
+            from urllib.parse import quote
+            encoded = quote(message) if message else ""
+            uri = f"https://api.whatsapp.com/send?phone={digits}" + (f"&text={encoded}" if encoded else "")
+            self._shell(f"am start -a android.intent.action.VIEW -d '{uri}' com.whatsapp")
+            return True, "Opened WhatsApp chat on your phone."
+        return False, "Phone not connected via ADB."
 
     def get_battery_level(self) -> Tuple[int, str]:
         """Query the Android phone's battery level via `dumpsys battery`."""

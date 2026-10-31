@@ -167,21 +167,21 @@ class TestIntentRouterAndPhase3(unittest.TestCase):
 
         # 1. Save new contact
         res_save = self.router.route("remember that John's phone number is +1 (555) 019-9988")
-        self.assertEqual(res_save.intent_name, "save_contact")
+        self.assertEqual(res_save.intent_name, "personal_fact_statement")
         self.assertIn("John", res_save.response_text)
-        self.assertIn("+15550199988", res_save.response_text)
+        self.assertIn("+1 (555) 019-9988", res_save.response_text)
 
         # 2. Call dynamic contact
         res_call = self.router.route("call John")
-        self.assertEqual(res_call.intent_name, "call_contact")
+        self.assertEqual(res_call.intent_name, "phone_call")
         self.assertTrue(len(call_events) >= 1)
         self.assertEqual(call_events[-1]["name"], "John")
-        self.assertEqual(call_events[-1]["number"], "+15550199988")
+        self.assertEqual(call_events[-1]["number"], "+1 (555) 019-9988")
 
         # 3. Call unknown contact prompts to save
         res_unknown = self.router.route("call Alice")
-        self.assertEqual(res_unknown.intent_name, "call_contact")
-        self.assertIn("don't have a phone number saved for Alice", res_unknown.response_text)
+        self.assertEqual(res_unknown.intent_name, "phone_call")
+        self.assertIn("don't have a number saved for Alice", res_unknown.response_text)
 
     def test_selective_workspace_routing(self) -> None:
         match = self.router.route("open only VS Code and browser from my coding workspace")

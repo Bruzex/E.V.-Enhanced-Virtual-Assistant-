@@ -548,19 +548,22 @@ def main() -> int:
     media_ctrl = MediaController(config=config, base_dir=base_dir)
     web_search = WebSearchTool(config=config)
     audio_router = AudioRouter(config=config, tts=tts, event_bus=event_bus)
+    rag = RAGMemoryManager(config=config, base_dir=base_dir)
+    brain.set_rag(rag)
     phone_adb = PhoneADBController(
         config=config,
         base_dir=base_dir,
         event_bus=event_bus,
         audio_router=audio_router,
+        rag=rag,
     )
     whatsapp = WhatsAppController(
         config=config,
         base_dir=base_dir,
         event_bus=event_bus,
         tts=tts,
+        rag=rag,
     )
-    rag = RAGMemoryManager(config=config, base_dir=base_dir)
 
     workspace_orch = WorkspaceOrchestrator(
         config=config,
@@ -586,6 +589,7 @@ def main() -> int:
         phone_adb=phone_adb,
         whatsapp=whatsapp,
         rag=rag,
+        tts=tts,
         event_bus=event_bus,
     )
     scheduler.set_dependencies(command_executor=intent_router.route)
