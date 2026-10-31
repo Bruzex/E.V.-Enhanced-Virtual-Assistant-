@@ -1,12 +1,12 @@
 # =============================================================================
-# E.V. (Enhanced Virtual Assistant) - Master Configuration (v2.0 Final)
+# E.V. (Enhanced Virtual Assistant) - Master Configuration (v2.1 Voice Tuned)
 # Target: MSI Bravo 15 (16 GB System RAM | AMD RX 6500M -> 0 MB VRAM)
 # =============================================================================
 
 app:
   name: "E.V."
   full_name: "Enhanced Virtual Assistant"
-  version: "2.0.0"
+  version: "2.1.0"
   offline_mode: true
   log_level: "INFO"
   log_file: "logs/ev.log"
@@ -37,27 +37,39 @@ llm:
   max_tokens: 256
   unload_after_idle_seconds: 300
   system_prompt: >
-    You are E.V. (Enhanced Virtual Assistant), a calm, concise, local-first
-    sci-fi AI assistant inspired by JARVIS. Keep responses under 2 sentences
-    so they can be spoken naturally via TTS.
+    You are E.V. (Enhanced Virtual Assistant), a calm, articulate, slightly formal
+    yet warm sci-fi AI assistant created by Bruprog and inspired by JARVIS.
+    Never repeat the user's words with 'I heard', never mention model filenames,
+    and never read out personal profile data unless explicitly asked.
+    Keep responses concise (1 to 2 sentences) so they sound natural when spoken aloud.
 
 voice:
   wake_word:
     enabled: true
     phrases:
-      - "hey ev"
+      - "hey evie"
       - "hey e v"
       - "hey e.v."
+      - "hey ev"
+      - "evie"
+      - "okay evie"
+      - "ok evie"
+      - "hi evie"
       - "okay ev"
-    continuous_listening: false
-    command_timeout_seconds: 6.0
-    energy_gate_threshold: 0.004
+    continuous_listening: true
+    command_timeout_seconds: 15.0
+    session_timeout_seconds: 60.0
+    energy_gate_threshold: 0.0025
+    barge_in_energy_threshold: 0.030
+    confirmation_sound: true
 
   stt:
     engine: "vosk"
     model_path: "models/vosk-model-small-en-us"
     sample_rate: 16000
-    chunk_size: 4000
+    chunk_size: 2000
+    min_confidence: 0.48
+    tts_cooldown_ms: 450
     input_device_index: null
 
   tts:
@@ -72,10 +84,12 @@ voice:
   clap_detector:
     enabled: true
     required_claps: 2
-    energy_threshold: 0.32
-    double_clap_min_gap_ms: 120
-    double_clap_max_gap_ms: 480
-    cooldown_seconds: 1.5
+    energy_threshold: 0.065
+    peak_threshold: 0.16
+    crest_factor_min: 2.0
+    double_clap_min_gap_ms: 80
+    double_clap_max_gap_ms: 850
+    cooldown_seconds: 1.2
     action: "toggle_listening"
 
 automation:
@@ -101,11 +115,8 @@ remote:
     adb_binary: "adb"
     connect_timeout_seconds: 3.0
     unlock_pin: null
-    contacts:
-      mom:
-        name: "Mom"
-        number: "+1 (555) 014-2290"
-        meta: "Mobile · via phone bridge"
+    # Personal contacts are stored in SQLite (data/memory.db), never in config.yaml
+    contacts: {}
 
   audio_routing:
     enabled: true
@@ -145,3 +156,9 @@ gui:
     faint: "#4A6079"
     danger: "#FF4D6D"
     success: "#3DF5A7"
+
+security:
+  # Permission & confirmation controls for sensitive personal actions
+  require_confirmation_for_messages: false
+  require_confirmation_for_calls: false
+  mask_pii_in_logs: true
