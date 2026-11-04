@@ -4,27 +4,7 @@ E.V. (Enhanced Virtual Assistant) — Wireless & USB ADB Phone Bridge
 ===================================================================
 Controls an Android smartphone over Wi-Fi (`adb connect <host>:<port>`) with
 automatic USB fallback (`adb -d`).
-
-Supported Capabilities (PRD Section 2.1.C & 5.5):
-  - `connect()` / `check_connection()`: Connects over Wi-Fi or USB and publishes
-    live status (`online` | `standby` | `offline`) to the top HUD status bar
-    via `Topics.CONNECTION_STATUS` (`id="phone"`).
-  - `unlock(pin=None)`: Wakes screen (`KEYCODE_WAKEUP`), swipes up to dismiss
-    lockscreen, and optionally enters PIN + Enter.
-  - `make_call(number_or_contact)` / `accept_call()` / `end_call()`: Initiates
-    calls via `android.intent.action.CALL`, answers incoming calls
-    (`KEYCODE_CALL`), or hangs up (`KEYCODE_ENDCALL`), while synchronizing the
-    Iron-Man `CallOverlay` on the HUD (`Topics.CALL_STATE`).
-  - `send_sms(number_or_contact, message)`: Sends or composes SMS via ADB intent
-    and key events.
-  - `open_app(app_name_or_package)`: Launches Android apps by friendly name
-    (WhatsApp, Instagram, YouTube, Spotify, Camera, Maps, Settings, Phone) or
-    package name using `monkey`.
-  - `take_screenshot()`: Captures phone screen via `exec-out screencap -p` to
-    `data/screenshots/phone_YYYYMMDD_HHMMSS.png`.
-  - `toggle_flashlight(enabled=None)`: Toggles Android camera torch (`cmd
-    flashlight` / Quick Settings tile fallback).
-  - `get_battery_level()`: Parses `dumpsys battery` for phone battery percentage.
+All contacts and phone numbers are resolved exclusively from SQLite (`data/memory.db`).
 """
 
 from __future__ import annotations
@@ -89,24 +69,15 @@ class PhoneADBController:
         raw_bin = str(adb_cfg.get("adb_binary", "adb"))
         self.adb_bin: Optional[str] = shutil.which(raw_bin)
         self.contacts: Dict[str, Dict[str, str]] = dict(adb_cfg.get("contacts", {}))
-        if "mom" not in self.contacts:
-            self.contacts["mom"] = {
-                "name": "Mom",
-                "number": "+1 (555) 014-2290",
-                "meta": "Mobile · via phone bridge",
-            }
 
         self._lock = threading.RLock()
         self._connected_serial: Optional[str] = None
-        self._connection_mode: str = "standby"  # 'wifi' | 'usb' | 'standby' | 'offline'
+        self._connection_mode: str = "standby"
         self._flashlight_on: bool = False
 
         self.screenshots_dir = base_dir / "data" / "screenshots"
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
 
-    # =========================================================================
-    # Connection & Discovery (Wi-Fi Primary + USB Fallback)
-    # =========================================================================
     @property
     def is_connected(self) -> bool:
         with self._lock:
@@ -137,7 +108,6 @@ class PhoneADBController:
             return False
 
         with self._lock:
-            # 1. Try Wireless ADB (host:port)
             target_serial = f"{self.host}:{self.port}"
             ok, out = self._run_adb(["connect", target_serial])
             if ok and ("connected to" in out.lower() or "already connected" in out.lower()):
@@ -147,7 +117,6 @@ class PhoneADBController:
                 self._set_hud_status("online")
                 return True
 
-            # 2. Fallback: Check `adb devices` for an attached USB device
             ok_dev, dev_out = self._run_adb(["devices"])
             if ok_dev:
                 for line in dev_out.splitlines()[1:]:
@@ -189,7 +158,6 @@ class PhoneADBController:
         if not cleaned:
             return {"name": "Unknown", "number": "", "meta": "Mobile · via phone bridge"}
 
-        # 1. If raw phone number digits were passed directly
         if any(c.isdigit() for c in cleaned):
             return {
                 "name": cleaned,
@@ -197,7 +165,6 @@ class PhoneADBController:
                 "meta": "Mobile · via phone bridge",
             }
 
-        # 2. Query the SQLite contacts database via RAGMemoryManager
         if self.rag is not None and hasattr(self.rag, "get_contact"):
             rec = self.rag.get_contact(cleaned)
             if rec is not None:
@@ -207,7 +174,6 @@ class PhoneADBController:
                     "meta": f"{rec.relationship.title() if rec.relationship else 'Mobile'} · via phone bridge",
                 }
 
-        # 3. Check optional config dictionary
         key = cleaned.lower()
         if key in self.contacts:
             return dict(self.contacts[key])
@@ -218,9 +184,6 @@ class PhoneADBController:
             "meta": "Mobile · via phone bridge",
         }
 
-    # =========================================================================
-    # Core Phone Control Actions
-    # =========================================================================
     def unlock(self, pin: Optional[str] = None) -> Tuple[bool, str]:
         """Wake screen, swipe up to dismiss keyguard, and optionally enter PIN."""
         code = pin or self.unlock_pin
@@ -259,7 +222,7 @@ class PhoneADBController:
         if not number:
             return (
                 False,
-                f"I don't have a phone number saved for {name} yet. You can tell me by saying '{name}'s phone number is ...'.",
+                f"I don't have a phone number saved for {name} yet, sir. You can tell me by saying '{name}'s phone number is ...'.",
             )
 
         dial_digits = re.sub(r"[^0-9+]", "", number)
@@ -283,10 +246,9 @@ class PhoneADBController:
                 },
                 source="phone_adb",
             )
-        return True, f"Your call to {name} is ready."
+        return True, f"Calling {name}, sir."
 
     def accept_call(self) -> Tuple[bool, str]:
-        """Answer an incoming or ringing call (`KEYCODE_CALL`)."""
         if self.is_connected:
             self._shell("input keyevent KEYCODE_CALL")
         if self.audio_router is not None:
@@ -294,7 +256,6 @@ class PhoneADBController:
         return True, "Call connected."
 
     def end_call(self) -> Tuple[bool, str]:
-        """End the active call (`KEYCODE_ENDCALL`) and restore speaker audio routing."""
         if self.is_connected:
             self._shell("input keyevent KEYCODE_ENDCALL")
         if self.audio_router is not None:
@@ -305,11 +266,14 @@ class PhoneADBController:
         """Send an SMS to a contact or phone number via ADB."""
         info = self.resolve_contact(contact_or_number)
         name = info["name"]
-        dial_digits = re.sub(r"[^0-9+]", "", info["number"]) or "+15550142290"
+        dial_digits = re.sub(r"[^0-9+]", "", info["number"])
         cleaned_msg = (message or "").strip()
 
+        if not dial_digits:
+            return False, f"I don't have a phone number saved for {name} yet, sir."
+
         if not cleaned_msg:
-            return False, f"What message would you like to send to {name}?"
+            return False, f"What message would you like to send to {name}, sir?"
 
         if self.is_connected:
             escaped = cleaned_msg.replace("'", "\\'")
@@ -317,12 +281,10 @@ class PhoneADBController:
                 f"am start -a android.intent.action.SENDTO -d sms:{dial_digits} "
                 f"--es sms_body '{escaped}' --ez exit_on_sent true"
             )
-            # Trigger send button on standard Android Messages UI
             self._shell("input keyevent KEYCODE_TAB && input keyevent KEYCODE_ENTER")
         return True, f"Sent message to {name}: {cleaned_msg}"
 
     def open_app(self, app_name: str) -> Tuple[bool, str]:
-        """Launch an Android app on the phone by name or package ID."""
         cleaned = (app_name or "").strip().lower()
         package = ANDROID_APP_PACKAGES.get(cleaned, cleaned)
 
@@ -331,18 +293,15 @@ class PhoneADBController:
         return True, f"Opened {app_name} on your phone."
 
     def toggle_flashlight(self, enable: Optional[bool] = None) -> Tuple[bool, str]:
-        """Toggle the phone's rear LED flashlight."""
         target_state = (not self._flashlight_on) if enable is None else bool(enable)
         self._flashlight_on = target_state
         state_word = "on" if target_state else "off"
 
         if self.is_connected:
-            # Android 13+ cmd flashlight support with broadcast fallback
-            self._shell(f"cmd statusbar expand-settings && input keyevent KEYCODE_BACK")
+            self._shell("cmd statusbar expand-settings && input keyevent KEYCODE_BACK")
         return True, f"Turned phone flashlight {state_word}."
 
     def take_screenshot(self) -> Tuple[bool, Path, str]:
-        """Capture the phone screen over ADB to `data/screenshots/phone_*.png`."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = self.screenshots_dir / f"phone_{ts}.png"
 
@@ -358,12 +317,7 @@ class PhoneADBController:
 
         return True, out_path, "Captured phone screen snapshot."
 
-
     def open_instagram_profile(self, username: str) -> Tuple[bool, str]:
-        """
-        Open a specific Instagram profile (`https://instagram.com/_u/<username>`)
-        on the Android phone via ADB VIEW intent (with desktop browser fallback).
-        """
         handle = (username or "").strip().lstrip("@")
         if not handle:
             return self.open_app("instagram")
@@ -376,7 +330,6 @@ class PhoneADBController:
             )
             return True, f"Opened @{handle} on Instagram on your phone."
 
-        # Desktop browser fallback when phone is not connected over ADB
         import webbrowser
         try:
             webbrowser.open(url, new=2)
@@ -385,7 +338,6 @@ class PhoneADBController:
         return True, f"Opened @{handle}'s Instagram profile."
 
     def search_contacts_app(self, query: str) -> Tuple[bool, str]:
-        """Open the Android Contacts app and search for `query` via ADB intent."""
         cleaned = (query or "").strip()
         if self.is_connected:
             if cleaned:
@@ -399,30 +351,28 @@ class PhoneADBController:
         return True, f"Searched your contacts for {cleaned}."
 
     def open_whatsapp_chat(self, phone_number: str, message: str = "") -> Tuple[bool, str]:
-        """Open a direct WhatsApp chat on the Android phone via `https://wa.me/` deep link."""
         digits = re.sub(r"[^0-9]", "", phone_number or "")
         if self.is_connected and digits:
             from urllib.parse import quote
             encoded = quote(message) if message else ""
             uri = f"https://api.whatsapp.com/send?phone={digits}" + (f"&text={encoded}" if encoded else "")
             self._shell(f"am start -a android.intent.action.VIEW -d '{uri}' com.whatsapp")
+            if message:
+                # Trigger send key event on Android WhatsApp chat screen
+                self._shell("sleep 1 && input keyevent KEYCODE_ENTER")
             return True, "Opened WhatsApp chat on your phone."
         return False, "Phone not connected via ADB."
 
     def get_battery_level(self) -> Tuple[int, str]:
-        """Query the Android phone's battery level via `dumpsys battery`."""
         if self.is_connected:
             ok, out = self._shell("dumpsys battery")
             if ok:
-                m = re.search(r"level:\\s*(\\d+)", out)
+                m = re.search(r"level:\s*(\d+)", out)
                 if m:
                     lvl = int(m.group(1))
                     return lvl, f"Your phone battery is at {lvl} percent."
         return 82, "Your phone battery is at 82 percent (bridge standby)."
 
-    # =========================================================================
-    # Low-Level ADB Subprocess Helpers
-    # =========================================================================
     def _build_adb_cmd(self, args: List[str]) -> List[str]:
         base = [self.adb_bin or "adb"]
         if self._connected_serial and args and args[0] not in ("connect", "devices"):

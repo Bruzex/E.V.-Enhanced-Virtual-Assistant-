@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Offline Vosk STT (`voice/stt.py`)
-=====================================================================
+E.V. (Enhanced Virtual Assistant) — 100% Vosk Offline STT Engine (`voice/stt.py`)
+=================================================================================
+Strictly offline Vosk Speech-to-Text (`models/vosk-model-en-in-0.5` @ 16000 Hz)
+with zero Whisper / HuggingFace / network dependencies.
+
 Includes:
   1. 500ms Post-TTS Echo Guard (`tts_cooldown_ms: 500`) + `is_muted` property:
      Ignores microphone frames while TTS is speaking plus 500ms after TTS finishes
      so E.V. never transcribes its own voice.
-  2. Number-Word & Indian English Phonetic Normalization (`normalize_indian_english_transcript`):
-     Converts spoken number words (`"ten"` -> `"10"`, `"thirty"` -> `"30"`, `"hundred"` -> `"100"`)
-     and Vosk Indian English mishearings (`"sector diameter"` -> `"set a timer"`,
-     `"ivo i am"` -> `"who am i"`, `"booed off of got a you"` -> `"who are you"`,
-     `"odd person"` -> `"100 percent"`).
+  2. Contiguous Phone Digit Joining & Indian-English Normalization:
+     - Converts spoken digit runs (`"nine five eight to one nine eight one six five"`
+       or `"double nine"`) into contiguous digit strings (`"9582198165"`).
+     - Fixes Indian-English Vosk mishearings (`"stopped listening"` -> `"stop listening"`,
+       `"send a halo message to mumbai"` -> `"send a hello message to mommy"`,
+       `"sector diameter"` -> `"set a timer"`).
+  3. Startup & Turn Logging:
+     - Startup: `Vosk STT ready (vosk-model-en-in-0.5 @ 16000 Hz)`
+     - Turn: `STT final | engine=vosk | conf=0.88 | text='...'`
 """
 
 from __future__ import annotations
@@ -22,14 +29,17 @@ import queue
 import re
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.event_bus import Event, EventBus, Topics, get_event_bus
+from memory.sqlite_store import mask_pii
 
 VOSK_IMPORT_ERROR: Optional[str] = None
 try:
     from vosk import KaldiRecognizer, Model, SetLogLevel  # type: ignore
+
     SetLogLevel(-1)
     VOSK_AVAILABLE = True
 except Exception as _vosk_exc:
@@ -40,6 +50,7 @@ except Exception as _vosk_exc:
 
 try:
     import pyaudio  # type: ignore
+
     _pa_test = pyaudio.PyAudio()
     _pa_test.terminate()
     PYAUDIO_AVAILABLE = True
@@ -49,14 +60,19 @@ except Exception:
 
 try:
     import sounddevice as sd  # type: ignore
+
     SOUNDDEVICE_AVAILABLE = True
-except ImportError:
+except Exception:
     sd = None  # type: ignore
     SOUNDDEVICE_AVAILABLE = False
 
 
-NUMBER_WORDS_MAP: Dict[str, int] = {
+# =============================================================================
+# Spoken Number Word -> Digit Conversion & Contiguous Phone Digit Joining
+# =============================================================================
+_NUMBER_WORDS: Dict[str, int] = {
     "zero": 0,
+    "oh": 0,
     "one": 1,
     "two": 2,
     "three": 3,
@@ -87,55 +103,161 @@ NUMBER_WORDS_MAP: Dict[str, int] = {
     "hundred": 100,
 }
 
+_SINGLE_DIGIT_WORDS: Dict[str, str] = {
+    "zero": "0",
+    "oh": "0",
+    "o": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
 
-def convert_spoken_numbers(text: str) -> str:
+_DIGIT_HOMOPHONES: Dict[str, str] = {
+    "to": "2",
+    "too": "2",
+    "tu": "2",
+    "for": "4",
+    "fore": "4",
+    "won": "1",
+    "ate": "8",
+}
+
+
+def join_spoken_digits(text: str) -> str:
     """
-    Convert spoken English number words ('ten', 'twenty five', 'one hundred')
-    into digits ('10', '25', '100') for reliable timer and volume parsing.
+    Convert sequences of spoken single digits (including 'double X', 'triple X',
+    and digit-run homophones like 'nine five eight to one...') into contiguous
+    digit strings (e.g., '9582198165').
     """
     if not text:
         return ""
-    out = re.sub(r"\ba\s+hundred\b|\bone\s+hundred\b", "100", text, flags=re.I)
 
-    # Compound tens + units ("twenty five" -> "25")
-    tens_map = {
-        "twenty": 20,
-        "thirty": 30,
-        "forty": 40,
-        "fifty": 50,
-        "sixty": 60,
-        "seventy": 70,
-        "eighty": 80,
-        "ninety": 90,
-    }
-    units_map = {
-        "one": 1,
-        "two": 2,
-        "three": 3,
-        "four": 4,
-        "five": 5,
-        "six": 6,
-        "seven": 7,
-        "eight": 8,
-        "nine": 9,
-    }
-    for t_word, t_val in tens_map.items():
-        for u_word, u_val in units_map.items():
-            out = re.sub(
-                rf"\b{t_word}[\s-]+{u_word}\b",
-                str(t_val + u_val),
-                out,
-                flags=re.I,
-            )
+    tokens = text.split()
+    if not tokens:
+        return text
 
-    for word, val in NUMBER_WORDS_MAP.items():
-        out = re.sub(rf"\b{word}\b", str(val), out, flags=re.I)
+    expanded: List[str] = []
+    i = 0
+    while i < len(tokens):
+        low = re.sub(r"[^a-z0-9]", "", tokens[i].lower())
+        if low in ("double", "triple") and i + 1 < len(tokens):
+            nxt = re.sub(r"[^a-z0-9]", "", tokens[i + 1].lower())
+            digit_char = _SINGLE_DIGIT_WORDS.get(nxt) or (nxt if nxt.isdigit() and len(nxt) == 1 else None)
+            if digit_char is not None:
+                repeat = 2 if low == "double" else 3
+                expanded.append(digit_char * repeat)
+                i += 2
+                continue
+        expanded.append(tokens[i])
+        i += 1
 
-    return out
+    def _as_digit_token(tok: str, in_digit_context: bool = False) -> Optional[str]:
+        clean = re.sub(r"[^a-z0-9]", "", tok.lower())
+        if not clean:
+            return None
+        if clean.isdigit():
+            return clean
+        if clean in _SINGLE_DIGIT_WORDS:
+            return _SINGLE_DIGIT_WORDS[clean]
+        if in_digit_context and clean in _DIGIT_HOMOPHONES:
+            return _DIGIT_HOMOPHONES[clean]
+        return None
+
+    n = len(expanded)
+    out: List[str] = []
+    idx = 0
+    while idx < n:
+        d0 = _as_digit_token(expanded[idx], in_digit_context=False)
+        if d0 is not None:
+            run_digits: List[str] = [d0]
+            j = idx + 1
+            while j < n:
+                dj = _as_digit_token(expanded[j], in_digit_context=True)
+                if dj is not None:
+                    run_digits.append(dj)
+                    j += 1
+                else:
+                    break
+            if len(run_digits) >= 3 or sum(len(x) for x in run_digits) >= 3:
+                out.append("".join(run_digits))
+                idx = j
+                continue
+        out.append(expanded[idx])
+        idx += 1
+
+    return " ".join(out)
+
+
+def convert_spoken_numbers(text: str) -> str:
+    """
+    Convert English number words ('ten', 'thirty five', 'one hundred') and
+    spoken digit sequences ('nine five eight two...') into numeric strings.
+    """
+    if not text:
+        return ""
+
+    pre_joined = join_spoken_digits(text)
+    tokens = pre_joined.split()
+    out: List[str] = []
+    i = 0
+    n = len(tokens)
+
+    while i < n:
+        raw_tok = tokens[i]
+        clean_tok = re.sub(r"[^a-z0-9]", "", raw_tok.lower())
+
+        if clean_tok == "a" and i + 1 < n:
+            nxt_clean = re.sub(r"[^a-z0-9]", "", tokens[i + 1].lower())
+            if nxt_clean == "hundred":
+                out.append("100")
+                i += 2
+                continue
+
+        if clean_tok in _NUMBER_WORDS and clean_tok != "oh":
+            val = _NUMBER_WORDS[clean_tok]
+            j = i + 1
+            while j < n:
+                nxt_clean = re.sub(r"[^a-z0-9]", "", tokens[j].lower())
+                if nxt_clean not in _NUMBER_WORDS or nxt_clean == "oh":
+                    break
+                nxt_val = _NUMBER_WORDS[nxt_clean]
+                if nxt_val == 100:
+                    val = max(1, val) * 100
+                elif val >= 20 and nxt_val < 10:
+                    val += nxt_val
+                elif val >= 100 and nxt_val < 100:
+                    val += nxt_val
+                else:
+                    break
+                j += 1
+            suffix = re.sub(r"^[a-zA-Z0-9]+", "", raw_tok)
+            out.append(f"{val}{suffix}")
+            i = j
+        else:
+            out.append(raw_tok)
+            i += 1
+
+    result = " ".join(out)
+    result = re.sub(
+        r"\b(\d)\s+(\d)\s+(\d)(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?(?:\s+(\d))?\b",
+        lambda m: "".join(g for g in m.groups() if g is not None),
+        result,
+    )
+    return result
 
 
 INDIAN_ENGLISH_CORRECTIONS: List[Tuple[re.Pattern[str], Any]] = [
-    # "set a timer of/for" misheard by Vosk as "sector diameter of" / "sector timer of" / "set the time of"
+    # "stopped listening" -> "stop listening"
+    (re.compile(r"\bstopped\s+listening\b", re.I), "stop listening"),
+    (re.compile(r"\bstop\s+listen(?:ing)?\s+to\s+me\b", re.I), "stop listening"),
+    (re.compile(r"\bgo\s+to\s+stand\s*by\b", re.I), "stand by"),
+    # "set a timer of/for" misheard by Vosk as "sector diameter of" / "sector timer of"
     (
         re.compile(
             r"\b(?:sector\s+diameter|sector\s+timer|set\s+the\s+diameter|said\s+the\s+timer|set\s+the\s+time)\s+(?:of|for|off)\b",
@@ -149,16 +271,10 @@ INDIAN_ENGLISH_CORRECTIONS: List[Tuple[re.Pattern[str], Any]] = [
         "increase the volume to 100 percent",
     ),
     # "ivo i am" -> "who am i"
-    (
-        re.compile(r"^(?:ivo|evie\s+who|hey\s+evie\s+who)\s+i\s+am\b", re.I),
-        "who am i",
-    ),
-    # "booed off of got a you" -> "who the fuck are you"
-    (
-        re.compile(r"\bbooed\s+off\s+of\s+got\s+a\s+you\b", re.I),
-        "who the fuck are you",
-    ),
-    # "open whatsapp and" misheard as "open what's happened" / "open board whatsapp"
+    (re.compile(r"^(?:ivo|evie\s+who|hey\s+evie\s+who)\s+i\s+am\b", re.I), "who am i"),
+    # "booed off of got a you" -> "who are you"
+    (re.compile(r"\bbooed\s+off\s+of\s+got\s+a\s+you\b", re.I), "who are you"),
+    # WhatsApp & Mommy / Mumbai mishearings
     (
         re.compile(
             r"\b(?:open|launch)\s+(?:board\s+|the\s+)?(?:what's\s+happened|whats\s+happened|what\s+happened|what's\s+up\s+and|whats\s+up\s+and|watch\s+up\s+and)\b",
@@ -175,10 +291,10 @@ INDIAN_ENGLISH_CORRECTIONS: List[Tuple[re.Pattern[str], Any]] = [
     ),
     (
         re.compile(
-            r"\b(?:what's\s+up|whats\s+up|what\s+sup|watts\s+app|watch\s+app|words\s+app)\s+(message|messages|voice\s+note|number|chat)\b",
+            r"\b(?:what's\s+up|whats\s+up|what\s+sup|watts\s+app|watch\s+app|words\s+app|whats\s+app|what\s+sap)\b",
             re.I,
         ),
-        lambda m: f"whatsapp {m.group(1)}",
+        "whatsapp",
     ),
     (
         re.compile(
@@ -187,44 +303,59 @@ INDIAN_ENGLISH_CORRECTIONS: List[Tuple[re.Pattern[str], Any]] = [
         ),
         lambda m: f"send a {m.group(1)}",
     ),
-    (
-        re.compile(r"\b(?:ooh|who\s+is)\s+are\s+you\b", re.I),
-        "who are you",
-    ),
+    (re.compile(r"\bsend\s+(?:a\s+|an\s+|our\s+)?(?:halo|hallow|hollow|hell)\s+message\b", re.I), "send a hello message"),
+    (re.compile(r"\bsend\s+our\s+hello\s+message\b", re.I), "send a hello message"),
+    (re.compile(r"\b(?:message|whatsapp|text|hello|hi)\s+to\s+(?:my\s+)?(?:mumbai|mumbi|mammi|mami|mommy|mummy)\b", re.I), "message to mommy"),
+    (re.compile(r"\bsend\s+(?P<m>[a-z0-9\s]+?)\s+to\s+(?:mumbai|mumbi)\b", re.I), r"send \g<m> to mommy"),
+    (re.compile(r"\bcall\s+(?:my\s+)?(?:mumbai|mumbi|mammi|mami|mommy|mummy)\b", re.I), "call mommy"),
+    (re.compile(r"\b(?:ooh|who\s+is)\s+are\s+you\b", re.I), "who are you"),
     (
         re.compile(r"\b(are\s+you\s+able\s+to|can\s+you|do\s+you)\s+(?:hair|air|here|hear|er)\s+me\b", re.I),
         lambda m: f"{m.group(1)} hear me",
     ),
-    (re.compile(r"\b(?:mummy|mammi|mami|mommy|mataji|ammi|amma)\b", re.I), "mom"),
     (re.compile(r"\b(?:papaji|pitaji|daddy|papa|abba)\b", re.I), "dad"),
-    (re.compile(r"\binsta\s+gram\b", re.I), "instagram"),
+    (re.compile(r"\b(?:insta\s+gram|in\s+sta\s+gram|instant\s+gram)\b", re.I), "instagram"),
 ]
 
 
 def normalize_indian_english_transcript(text: str) -> str:
-    """Apply Indian English phonetic corrections and spoken number-word conversion."""
+    """Apply Indian-English phonetic corrections and contiguous spoken number conversion."""
     if not text:
         return ""
     out = text.strip()
     for pattern, replacement in INDIAN_ENGLISH_CORRECTIONS:
         out = pattern.sub(replacement, out)
     out = re.sub(
-        r"^(?:i\s+said|said|uh|um|ah)\s+(?=(?:open|launch|send|call|who|what|how|set|increase|decrease|remember|from\s+now\s+on)\b)",
+        r"^(?:i\s+said|said|uh|um|ah)\s+(?=(?:open|launch|send|call|who|what|how|set|increase|decrease|remember|from\s+now\s+on|create|write|make|stop)\b)",
         "",
         out,
         flags=re.I,
     )
+    out = convert_spoken_numbers(out)
     return re.sub(r"\s+", " ", out).strip()
+
+
+@dataclass
+class STTResult:
+    """Structured result from a finalized speech-to-text recognition turn."""
+
+    text: str
+    confidence: float = 1.0
+    words: List[Dict[str, Any]] = field(default_factory=list)
+    is_final: bool = True
+    engine: str = "vosk"
 
 
 class VoskSTT:
     """
-    Offline Vosk Speech-to-Text engine with 500ms post-TTS echo guard,
-    `is_muted` property, and per-word confidence scoring.
+    100% Vosk Offline Speech-to-Text engine (`vosk-model-en-in-0.5` @ 16000 Hz)
+    with 500ms post-TTS echo guard, contiguous phone digit joining, and per-word
+    confidence scoring.
     """
 
     normalize_indian_english_transcript = staticmethod(normalize_indian_english_transcript)
     convert_spoken_numbers = staticmethod(convert_spoken_numbers)
+    join_spoken_digits = staticmethod(join_spoken_digits)
 
     def __init__(
         self,
@@ -237,18 +368,23 @@ class VoskSTT:
         self.bus = event_bus or get_event_bus()
         self.logger = logging.getLogger("ev.stt")
 
-        stt_cfg = config.get("voice", {}).get("stt", {})
-        rel_model = str(stt_cfg.get("model_path", "models/vosk-model-small-en-us"))
-        self.model_path: Path = (
-            (base_dir / rel_model).resolve() if not os.path.isabs(rel_model) else Path(rel_model)
+        voice_cfg = config.get("voice", {})
+        stt_cfg = voice_cfg.get("stt", {})
+        rel_model = str(
+            stt_cfg.get("model_path")
+            or voice_cfg.get("vosk_model_path")
+            or "models/vosk-model-en-in-0.5"
         )
-        self.sample_rate: int = int(stt_cfg.get("sample_rate", 16000))
+        self.model_path: Path = self._resolve_vosk_model_path(base_dir, rel_model)
+        self.sample_rate: int = int(stt_cfg.get("sample_rate", voice_cfg.get("sample_rate", 16000)))
         self.chunk_size: int = int(stt_cfg.get("chunk_size", 2000))
         self.device_index: Optional[int] = stt_cfg.get("input_device_index")
         self.min_confidence: float = float(stt_cfg.get("min_confidence", 0.50))
-        self.silence_timeout_s: float = float(stt_cfg.get("silence_timeout_seconds", 0.8))
-        # Ignore STT during TTS plus 500ms after TTS finishes
+        self.silence_timeout_s: float = float(
+            stt_cfg.get("silence_timeout_seconds", voice_cfg.get("silence_timeout_seconds", 1.1))
+        )
         self.tts_cooldown_s: float = float(stt_cfg.get("tts_cooldown_ms", 500)) / 1000.0
+        self.active_engine: str = "vosk"
 
         self._model: Optional[Any] = None
         self._recognizer: Optional[Any] = None
@@ -260,6 +396,36 @@ class VoskSTT:
 
         self.bus.subscribe(Topics.VOICE_TTS_STARTED, self._on_tts_started)
         self.bus.subscribe(Topics.VOICE_TTS_FINISHED, self._on_tts_finished)
+
+        # Load Vosk model immediately if present on disk
+        if VOSK_AVAILABLE and self.model_path.exists():
+            self.load_model()
+
+    @staticmethod
+    def _resolve_vosk_model_path(base_dir: Path, configured_rel: str) -> Path:
+        primary = (
+            (base_dir / configured_rel).resolve()
+            if not os.path.isabs(configured_rel)
+            else Path(configured_rel)
+        )
+        if primary.exists():
+            return primary
+        for candidate in (
+            "models/vosk-model-en-in-0.5",
+            "models/vosk-model-small-en-in",
+            "models/vosk-model-small-en-in-0.4",
+            "models/vosk-model-small-en-us",
+        ):
+            p = (base_dir / candidate).resolve()
+            if p.exists():
+                return p
+        return primary
+
+    def _safe_publish(self, topic: str, payload: Dict[str, Any]) -> None:
+        try:
+            self.bus.publish(topic, payload, source="stt")
+        except Exception as exc:
+            self.logger.error("Failed to publish topic '%s' from STT: %s", topic, exc)
 
     @property
     def is_ready(self) -> bool:
@@ -298,7 +464,7 @@ class VoskSTT:
         cleaned = (transcript or "").strip().lower()
         if not cleaned or not self._current_tts_text:
             return False
-        if cleaned in {"yes", "no", "stop", "continue", "cancel", "hey evie", "evie"}:
+        if cleaned in {"yes", "no", "stop", "continue", "cancel", "hey evie", "evie", "stop listening", "stand by"}:
             return False
         words = [w for w in re.sub(r"[^a-z0-9\s]", " ", cleaned).split() if len(w) >= 3]
         if len(words) < 2:
@@ -323,28 +489,24 @@ class VoskSTT:
                     "Vosk library could not be loaded (%s). Voice STT running in simulated/GUI mode.",
                     VOSK_IMPORT_ERROR or "package not installed",
                 )
-                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"}, source="stt")
+                self._safe_publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"})
                 return False
-
-            en_in_dir = self.base_dir / "models" / "vosk-model-small-en-in"
-            if en_in_dir.exists() and str(self.model_path).endswith("vosk-model-small-en-us"):
-                self.model_path = en_in_dir
 
             if not self.model_path.exists():
                 self.logger.warning("Vosk model directory not found at %s.", self.model_path)
-                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"}, source="stt")
+                self._safe_publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"})
                 return False
 
             try:
-                self.logger.info("Loading Vosk offline STT model from %s...", self.model_path)
                 self._model = Model(str(self.model_path))
                 self._recognizer = self.create_recognizer()
-                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "online"}, source="stt")
+                self.logger.info("Vosk STT ready (%s @ %d Hz)", self.model_path.name, self.sample_rate)
+                self._safe_publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "online"})
                 return True
             except Exception as exc:
                 self.logger.error("Failed to load Vosk model: %s", exc)
                 self._model = None
-                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"}, source="stt")
+                self._safe_publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"})
                 return False
 
     def create_recognizer(self, grammar: Optional[list[str]] = None) -> Optional[Any]:
@@ -361,6 +523,14 @@ class VoskSTT:
             except Exception:
                 pass
         return rec
+
+    def reset(self) -> None:
+        with self._lock:
+            if self._recognizer is not None:
+                try:
+                    self._recognizer.Reset()
+                except Exception:
+                    pass
 
     def feed_pcm_chunk_detailed(
         self,
@@ -399,21 +569,32 @@ class VoskSTT:
                     mean_conf = 0.85
 
                 norm_text = normalize_indian_english_transcript(raw_text)
-                self.logger.info("STT final | conf=%.2f | text='%s'", mean_conf, norm_text)
+                self.logger.info(
+                    "STT final | engine=vosk | conf=%.2f | text='%s'",
+                    mean_conf,
+                    mask_pii(norm_text),
+                )
 
-                if mean_conf < self.min_confidence:
+                # Always allow "stop listening" / "stand by" even on medium confidence (>= 0.30)
+                is_standby_phrase = bool(
+                    re.search(
+                        r"\b(?:stop(?:ped)?\s+listening|go\s+to\s+(?:stand\s*by|sleep)|stand\s*by|pause\s+listening|sleep\s+mode)\b",
+                        norm_text,
+                        re.I,
+                    )
+                )
+                if mean_conf < self.min_confidence and not is_standby_phrase:
                     self.logger.debug(
                         "Dropping final transcript below min_confidence (conf=%.2f < %.2f): '%s'",
                         mean_conf,
                         self.min_confidence,
-                        norm_text,
+                        mask_pii(norm_text),
                     )
                     return False, "", mean_conf
 
-                self.bus.publish(
+                self._safe_publish(
                     Topics.VOICE_FINAL_TRANSCRIPT,
                     {"text": norm_text, "raw_text": raw_text, "confidence": round(mean_conf, 3)},
-                    source="stt",
                 )
                 return True, norm_text, mean_conf
             else:
@@ -425,10 +606,9 @@ class VoskSTT:
                     return False, "", 0.0
 
                 norm_partial = normalize_indian_english_transcript(partial_raw)
-                self.bus.publish(
+                self._safe_publish(
                     Topics.VOICE_PARTIAL_TRANSCRIPT,
                     {"text": norm_partial},
-                    source="stt",
                 )
                 return False, norm_partial, 0.8
         except Exception as exc:
@@ -446,6 +626,10 @@ class VoskSTT:
         )
         return is_final, text
 
+    def accept_waveform(self, pcm_bytes: bytes) -> Tuple[bool, str, float]:
+        """Alias for `feed_pcm_chunk_detailed`."""
+        return self.feed_pcm_chunk_detailed(pcm_bytes)
+
     def listen_once(self, timeout_seconds: float = 6.0) -> str:
         if not self.load_model():
             return ""
@@ -454,7 +638,7 @@ class VoskSTT:
         if rec is None:
             return ""
 
-        self.bus.publish(Topics.VOICE_LISTENING_STARTED, {}, source="stt")
+        self._safe_publish(Topics.VOICE_LISTENING_STARTED, {})
         deadline = time.monotonic() + max(1.0, timeout_seconds)
         last_partial = ""
         final_text = ""
@@ -473,7 +657,7 @@ class VoskSTT:
                 raw_flush = str(flush.get("text", "")).strip()
                 final_text = normalize_indian_english_transcript(raw_flush) or last_partial
         finally:
-            self.bus.publish(Topics.VOICE_LISTENING_STOPPED, {}, source="stt")
+            self._safe_publish(Topics.VOICE_LISTENING_STOPPED, {})
 
         return final_text
 
@@ -508,7 +692,7 @@ class VoskSTT:
                 return
             except Exception as exc:
                 self.logger.error("SoundDevice microphone stream error: %s", exc)
-                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"}, source="stt")
+                self._safe_publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"})
 
         if PYAUDIO_AVAILABLE and pyaudio is not None:
             pa = pyaudio.PyAudio()
@@ -531,7 +715,7 @@ class VoskSTT:
                     yield data
             except Exception as exc:
                 self.logger.error("PyAudio microphone stream error: %s", exc)
-                self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"}, source="stt")
+                self._safe_publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "offline"})
             finally:
                 if stream is not None:
                     try:

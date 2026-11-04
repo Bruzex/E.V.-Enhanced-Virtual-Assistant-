@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Thread-Safe Event Bus
-=========================================================
+E.V. (Enhanced Virtual Assistant) — Non-Reentrant Thread-Safe Event Bus (`core/event_bus.py`)
+=============================================================================================
 Lightweight publish/subscribe broker that decouples background worker threads
 (Vosk STT, Wake-Word loop, Clap Detector, llama.cpp Brain, Workspace Orchestrator,
 Timed Scheduler, ADB/WhatsApp bridges) from the PyQt HUD main thread.
 
-Key Design Principles:
-  - Zero external dependencies (pure Python stdlib: threading, logging, time).
-  - Thread-safe subscription management via RLock.
-  - Fault isolation: an exception inside one subscriber callback is logged and
-    never crashes the publisher or blocks subsequent subscribers.
-  - Supports wildcard ('*') listeners for global debugging, telemetry, or Qt
-    signal bridging.
+Key Safety Guarantees:
+  - Non-Reentrant Publish Guard: Thread-local active-topic set and depth cap
+    prevent any subscriber from recursively re-publishing the same topic while
+    still inside the publish call stack (eliminates `maximum recursion depth exceeded`).
+  - Fault Isolation: Every subscriber invocation is wrapped in `try/except`
+    (catching both `Exception` and `RecursionError`), logged, and skipped so one
+    faulty handler never crashes the voice loop or blocks subsequent subscribers.
+  - Complete Topic Registry: Includes both canonical `VOICE_*` names and short
+    aliases (`WAKEWORD_DETECTED`, `TRANSCRIPT_PARTIAL`, `TRANSCRIPT_FINAL`).
 """
 
 from __future__ import annotations
@@ -21,14 +23,11 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 
-# =============================================================================
-# Standard Event Topic Constants
-# =============================================================================
 class Topics:
-    """Canonical event topic names used across E.V. modules."""
+    """Canonical event topic names and aliases used across E.V. modules."""
 
     # GUI / Presence State
     ORB_STATE = "orb.state"                     # payload: {"state": str, "progress": float}
@@ -37,29 +36,33 @@ class Topics:
     SYSTEM_METRICS = "system.metrics"           # payload: {"cpu": int, "ram_gb": float, "battery": int}
     RAM_PRESSURE = "system.ram_pressure"        # payload: {"level": "warning"|"critical", "rss_gb": float}
 
-    # Voice & Audio Pipeline
-    VOICE_WAKEWORD_DETECTED = "voice.wakeword"  # payload: {"phrase": str, "timestamp": float}
+    # Voice & Audio Pipeline (canonical + short aliases)
+    VOICE_WAKEWORD_DETECTED = "voice.wakeword"
+    WAKEWORD_DETECTED = "voice.wakeword"
     VOICE_LISTENING_STARTED = "voice.listening.started"
     VOICE_LISTENING_STOPPED = "voice.listening.stopped"
-    VOICE_PARTIAL_TRANSCRIPT = "voice.stt.partial"   # payload: {"text": str}
-    VOICE_FINAL_TRANSCRIPT = "voice.stt.final"       # payload: {"text": str, "confidence": float}
-    VOICE_USER_COMMAND = "voice.command"             # payload: {"text": str, "source": "voice"|"gui"|"text"}
-    VOICE_TTS_STARTED = "voice.tts.started"          # payload: {"text": str}
-    VOICE_TTS_FINISHED = "voice.tts.finished"        # payload: {"text": str}
-    VOICE_CLAP_DETECTED = "voice.clap"               # payload: {"count": int, "energy": float}
+    VOICE_PARTIAL_TRANSCRIPT = "voice.stt.partial"
+    TRANSCRIPT_PARTIAL = "voice.stt.partial"
+    VOICE_FINAL_TRANSCRIPT = "voice.stt.final"
+    TRANSCRIPT_FINAL = "voice.stt.final"
+    VOICE_USER_COMMAND = "voice.command"
+    VOICE_INTERRUPT = "voice.interrupt"
+    VOICE_TTS_STARTED = "voice.tts.started"
+    VOICE_TTS_FINISHED = "voice.tts.finished"
+    VOICE_CLAP_DETECTED = "voice.clap"
 
     # Brain / LLM & Intent Routing
-    BRAIN_THINKING_STARTED = "brain.thinking.started"  # payload: {"prompt": str}
-    BRAIN_RESPONSE_READY = "brain.response.ready"      # payload: {"text": str, "latency_ms": float, "from_llm": bool}
-    BRAIN_MODEL_UNLOADED = "brain.model.unloaded"      # payload: {"reason": str}
+    BRAIN_THINKING_STARTED = "brain.thinking.started"
+    BRAIN_RESPONSE_READY = "brain.response.ready"
+    BRAIN_MODEL_UNLOADED = "brain.model.unloaded"
 
-    # Workspace & Timed Commands (Phase 2 & 3 hooks)
-    WORKSPACE_PROGRESS = "workspace.progress"   # payload: {"name": str, "status": str, "completed": int, "total": int}
-    COUNTDOWN_UPDATE = "scheduler.countdown"    # payload: {"label": str, "detail": str, "total": int, "remaining": int}
-    CALL_STATE = "remote.call.state"            # payload: {"direction": str, "status": str, "name": str, "number": str}
+    # Workspace & Timed Commands
+    WORKSPACE_PROGRESS = "workspace.progress"
+    COUNTDOWN_UPDATE = "scheduler.countdown"
+    CALL_STATE = "remote.call.state"
 
     # User Settings Toggles from GUI
-    SETTINGS_CHANGED = "settings.changed"       # payload: {"key": str, "value": Any, "settings": dict}
+    SETTINGS_CHANGED = "settings.changed"
 
 
 @dataclass(frozen=True)
@@ -77,12 +80,11 @@ SubscriberCallback = Callable[[Event], None]
 
 class EventBus:
     """
-    Thread-safe synchronous/asynchronous pub/sub event bus.
-    Callbacks are invoked inline on the publishing thread by default; GUI
-    components should subscribe through a QObject signal bridge (such as
-    SystemBridge in main.py) so Qt automatically marshals calls onto the
-    main GUI event loop thread.
+    Thread-safe, non-reentrant pub/sub event bus.
+    Prevents recursive re-entry on the same topic and isolates subscriber exceptions.
     """
+
+    MAX_PUBLISH_DEPTH = 6
 
     def __init__(self) -> None:
         self._logger = logging.getLogger("ev.event_bus")
@@ -91,12 +93,21 @@ class EventBus:
         self._wildcard_subscribers: List[SubscriberCallback] = []
         self._history_limit = 50
         self._recent_events: List[Event] = []
+        self._tls = threading.local()
+
+    def _get_tls_state(self) -> tuple[Set[str], int]:
+        active: Optional[Set[str]] = getattr(self._tls, "active_topics", None)
+        if active is None:
+            active = set()
+            self._tls.active_topics = active
+        depth: int = int(getattr(self._tls, "depth", 0))
+        return active, depth
 
     def subscribe(self, topic: str, callback: SubscriberCallback) -> Callable[[], None]:
-        """
-        Register a callback for a specific topic (or '*' for all topics).
-        Returns an unsubscribe callable for convenient cleanup.
-        """
+        """Register a callback for a specific topic (or '*' for all topics)."""
+        if not callable(callback) or callback is self.publish:
+            return lambda: None
+
         with self._lock:
             if topic == "*":
                 if callback not in self._wildcard_subscribers:
@@ -132,35 +143,53 @@ class EventBus:
     ) -> Event:
         """
         Publish an event to all topic subscribers and wildcard listeners.
-        Exceptions in any subscriber are caught and logged so one faulty module
-        never breaks the pipeline.
+        Non-reentrant per topic: if a subscriber attempts to publish the same
+        `topic` while already inside `publish(topic)` on the same thread (or if
+        nesting exceeds `MAX_PUBLISH_DEPTH`), the re-entrant call returns immediately.
         """
+        safe_payload = dict(payload) if isinstance(payload, dict) else {}
         event = Event(
-            topic=topic,
-            payload=dict(payload) if payload else {},
+            topic=str(topic),
+            payload=safe_payload,
             timestamp=time.time(),
-            source=source,
+            source=str(source),
         )
 
-        with self._lock:
-            self._recent_events.append(event)
-            if len(self._recent_events) > self._history_limit:
-                self._recent_events = self._recent_events[-self._history_limit :]
+        active_topics, depth = self._get_tls_state()
+        if topic in active_topics or depth >= self.MAX_PUBLISH_DEPTH:
+            self._logger.debug(
+                "Skipped re-entrant publish for topic '%s' (source=%s, depth=%d).",
+                topic,
+                source,
+                depth,
+            )
+            return event
 
-            callbacks = list(self._subscribers.get(topic, ()))
-            wildcards = list(self._wildcard_subscribers)
+        active_topics.add(topic)
+        self._tls.depth = depth + 1
+        try:
+            with self._lock:
+                self._recent_events.append(event)
+                if len(self._recent_events) > self._history_limit:
+                    self._recent_events = self._recent_events[-self._history_limit :]
 
-        for cb in callbacks + wildcards:
-            try:
-                cb(event)
-            except Exception as exc:
-                self._logger.error(
-                    "Unhandled exception in subscriber %r for topic '%s': %s",
-                    getattr(cb, "__qualname__", cb),
-                    topic,
-                    exc,
-                    exc_info=True,
-                )
+                callbacks = list(self._subscribers.get(topic, ()))
+                wildcards = list(self._wildcard_subscribers)
+
+            for cb in callbacks + wildcards:
+                try:
+                    cb(event)
+                except (Exception, RecursionError) as exc:
+                    self._logger.error(
+                        "Subscriber %r raised %s on topic '%s': %s",
+                        getattr(cb, "__qualname__", cb),
+                        type(exc).__name__,
+                        topic,
+                        exc,
+                    )
+        finally:
+            active_topics.discard(topic)
+            self._tls.depth = depth
 
         return event
 
@@ -177,7 +206,6 @@ class EventBus:
             self._recent_events.clear()
 
 
-# Singleton accessor for convenience when passing the bus instance isn't desired
 _GLOBAL_BUS: Optional[EventBus] = None
 _GLOBAL_LOCK = threading.Lock()
 
@@ -190,4 +218,3 @@ def get_event_bus() -> EventBus:
             if _GLOBAL_BUS is None:
                 _GLOBAL_BUS = EventBus()
     return _GLOBAL_BUS
-
