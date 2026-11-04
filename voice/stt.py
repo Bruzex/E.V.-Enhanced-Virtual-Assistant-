@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-<<<<<<< HEAD
 E.V. (Enhanced Virtual Assistant) — Offline Vosk STT (`voice/stt.py`)
 =====================================================================
 Includes:
@@ -12,29 +11,6 @@ Includes:
      and Vosk Indian English mishearings (`"sector diameter"` -> `"set a timer"`,
      `"ivo i am"` -> `"who am i"`, `"booed off of got a you"` -> `"who are you"`,
      `"odd person"` -> `"100 percent"`).
-=======
-E.V. (Enhanced Virtual Assistant) — Indian-Accent-Tuned Offline Vosk STT (`stt.py`)
-===================================================================================
-Upgrades for Indian English Pronunciation, Accuracy & Echo Rejection:
-  1. Per-Word Confidence Extraction (`feed_pcm_chunk_detailed`):
-     Parses Vosk's `result` word array (`[{"conf": 0.92, "word": "..."}]`),
-     computes mean word confidence (`0.0` to `1.0`), and passes it downstream
-     so `IntentRouter` can reject low-confidence misrecognitions instead of
-     firing wrong actions.
-  2. Indian English Phonetic Normalization (`normalize_indian_english_transcript`):
-     Corrects systematic `vosk-model-small-en-us` misrecognitions on Indian
-     English speech:
-       - `"what's up"` / `"what sup"` / `"watts app"` / `"watch app"` -> `"whatsapp"`
-       - `"mummy"` / `"mammi"` / `"mami"` / `"mommy"` -> `"mom"`
-       - `"who are"` misheard as `"the are"` / `"do are"` / `"ooh are"` -> `"who are"`
-       - `"insta gram"` -> `"instagram"`
-  3. Strong Post-TTS Echo Guard (`tts_cooldown_ms: 450`):
-     Blocks speaker reverb/tail frames for 450ms after TTS finishes and checks
-     word overlap against E.V.'s last spoken utterance so E.V. never triggers
-     on her own voice.
-  4. Smaller Audio Frame Blocksize (`chunk_size: 2000` = 125ms @ 16kHz):
-     Doubles time resolution for `ClapDetector` and cuts wake-word latency in half.
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 """
 
 from __future__ import annotations
@@ -79,7 +55,6 @@ except ImportError:
     SOUNDDEVICE_AVAILABLE = False
 
 
-<<<<<<< HEAD
 NUMBER_WORDS_MAP: Dict[str, int] = {
     "zero": 0,
     "one": 1,
@@ -222,37 +197,16 @@ INDIAN_ENGLISH_CORRECTIONS: List[Tuple[re.Pattern[str], Any]] = [
     ),
     (re.compile(r"\b(?:mummy|mammi|mami|mommy|mataji|ammi|amma)\b", re.I), "mom"),
     (re.compile(r"\b(?:papaji|pitaji|daddy|papa|abba)\b", re.I), "dad"),
-=======
-# Systematic Indian-English phonetic corrections for vosk-model-small-en-us
-INDIAN_ENGLISH_CORRECTIONS: List[Tuple[re.Pattern[str], str]] = [
-    # "open whatsapp" / "on whatsapp" often heard as "open what's up" / "on what's up"
-    (re.compile(r"\b(?:open|launch|on|to|in|my|check|read)\s+(?:what's\s+up|whats\s+up|what\s+sup|watts\s+app|watch\s+app|what\s+app)\b", re.I),
-     lambda m: m.group(0).split()[0] + " whatsapp"),  # type: ignore
-    (re.compile(r"\b(?:what's\s+up|whats\s+up|what\s+sup|watts\s+app|watch\s+app)\s+(?:message|voice\s+note|number|chat)\b", re.I),
-     lambda m: "whatsapp " + " ".join(m.group(0).split()[2:])),  # type: ignore
-    # "Who are you" when Indian Englishunaspirated 'wh' is heard as "the are you" / "do are you" / "you are you" / "ooh are you"
-    (re.compile(r"\b(?:the|do|to|you|ooh|oh|how)\s+are\s+you\b(?:\s+tell\s+me)?", re.I), "who are you"),
-    # "are you able to hear me" when "hear" is heard as "hair" / "air" / "here"
-    (re.compile(r"\b(?:are\s+you\s+able\s+to|can\s+you)\s+(?:hair|air|here|hear|er)\s+me\b", re.I), "can you hear me"),
-    # Indian family terms -> canonical contact names
-    (re.compile(r"\b(?:mummy|mammi|mami|mommy|mataji)\b", re.I), "mom"),
-    (re.compile(r"\b(?:papaji|pitaji|daddy)\b", re.I), "dad"),
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     (re.compile(r"\binsta\s+gram\b", re.I), "instagram"),
 ]
 
 
 def normalize_indian_english_transcript(text: str) -> str:
-<<<<<<< HEAD
     """Apply Indian English phonetic corrections and spoken number-word conversion."""
-=======
-    """Apply lightweight phonetic normalizations for Indian English speech."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     if not text:
         return ""
     out = text.strip()
     for pattern, replacement in INDIAN_ENGLISH_CORRECTIONS:
-<<<<<<< HEAD
         out = pattern.sub(replacement, out)
     out = re.sub(
         r"^(?:i\s+said|said|uh|um|ah)\s+(?=(?:open|launch|send|call|who|what|how|set|increase|decrease|remember|from\s+now\s+on)\b)",
@@ -260,14 +214,10 @@ def normalize_indian_english_transcript(text: str) -> str:
         out,
         flags=re.I,
     )
-=======
-        out = pattern.sub(replacement, out)  # type: ignore
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     return re.sub(r"\s+", " ", out).strip()
 
 
 class VoskSTT:
-<<<<<<< HEAD
     """
     Offline Vosk Speech-to-Text engine with 500ms post-TTS echo guard,
     `is_muted` property, and per-word confidence scoring.
@@ -275,13 +225,6 @@ class VoskSTT:
 
     normalize_indian_english_transcript = staticmethod(normalize_indian_english_transcript)
     convert_spoken_numbers = staticmethod(convert_spoken_numbers)
-=======
-    normalize_indian_english_transcript = staticmethod(normalize_indian_english_transcript)
-    """
-    Offline Vosk Speech-to-Text engine with per-word confidence scoring,
-    Indian English phonetic normalization, and post-TTS echo rejection.
-    """
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
     def __init__(
         self,
@@ -300,19 +243,11 @@ class VoskSTT:
             (base_dir / rel_model).resolve() if not os.path.isabs(rel_model) else Path(rel_model)
         )
         self.sample_rate: int = int(stt_cfg.get("sample_rate", 16000))
-<<<<<<< HEAD
         self.chunk_size: int = int(stt_cfg.get("chunk_size", 2000))
         self.device_index: Optional[int] = stt_cfg.get("input_device_index")
         self.min_confidence: float = float(stt_cfg.get("min_confidence", 0.38))
         # Ignore STT during TTS plus 500ms after TTS finishes
         self.tts_cooldown_s: float = float(stt_cfg.get("tts_cooldown_ms", 500)) / 1000.0
-=======
-        # Smaller 2000-frame (125ms) chunk size for responsive wake-word & clap detection
-        self.chunk_size: int = int(stt_cfg.get("chunk_size", 2000))
-        self.device_index: Optional[int] = stt_cfg.get("input_device_index")
-        self.min_confidence: float = float(stt_cfg.get("min_confidence", 0.52))
-        self.tts_cooldown_s: float = float(stt_cfg.get("tts_cooldown_ms", 450)) / 1000.0
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
         self._model: Optional[Any] = None
         self._recognizer: Optional[Any] = None
@@ -331,27 +266,17 @@ class VoskSTT:
 
     @property
     def is_muted(self) -> bool:
-<<<<<<< HEAD
         """True while muted for active TTS playback."""
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         return self._muted_for_tts.is_set()
 
     @property
     def is_tts_speaking(self) -> bool:
-<<<<<<< HEAD
         """True while TTS is speaking OR within the 500ms post-TTS echo cooldown window."""
         if self._muted_for_tts.is_set():
             return True
         if self._tts_finished_ts > 0.0 and (time.monotonic() - self._tts_finished_ts) < self.tts_cooldown_s:
             return True
         return False
-=======
-        if self._muted_for_tts.is_set():
-            return True
-        # Also treat the first 450ms after TTS finishes as echo cooldown
-        return (time.monotonic() - self._tts_finished_ts) < self.tts_cooldown_s
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
     def _on_tts_started(self, event: Event) -> None:
         self._current_tts_text = str(event.payload.get("text", "")).lower()
@@ -369,7 +294,6 @@ class VoskSTT:
             self._muted_for_tts.clear()
 
     def is_likely_tts_echo(self, transcript: str) -> bool:
-<<<<<<< HEAD
         cleaned = (transcript or "").strip().lower()
         if not cleaned or not self._current_tts_text:
             return False
@@ -377,14 +301,6 @@ class VoskSTT:
             return False
         words = [w for w in re.sub(r"[^a-z0-9\s]", " ", cleaned).split() if len(w) >= 3]
         if len(words) < 2:
-=======
-        """Check if a recognized transcript is speaker bleed from E.V.'s own TTS voice."""
-        cleaned = (transcript or "").strip().lower()
-        if not cleaned or not self._current_tts_text:
-            return False
-        words = [w for w in re.sub(r"[^a-z0-9\s]", " ", cleaned).split() if len(w) >= 3]
-        if not words:
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             return False
         overlap = sum(1 for w in words if w in self._current_tts_text)
         return (overlap / float(len(words))) >= 0.60
@@ -409,10 +325,6 @@ class VoskSTT:
                 self.bus.publish(Topics.CONNECTION_STATUS, {"id": "mic", "status": "standby"}, source="stt")
                 return False
 
-<<<<<<< HEAD
-=======
-            # Also check if user downloaded vosk-model-small-en-in (Indian English model)
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             en_in_dir = self.base_dir / "models" / "vosk-model-small-en-in"
             if en_in_dir.exists() and str(self.model_path).endswith("vosk-model-small-en-us"):
                 self.model_path = en_in_dir
@@ -455,13 +367,6 @@ class VoskSTT:
         recognizer: Optional[Any] = None,
         allow_during_tts: bool = False,
     ) -> Tuple[bool, str, float]:
-<<<<<<< HEAD
-=======
-        """
-        Feed a raw 16-bit mono PCM chunk into Vosk.
-        Returns `(is_final, normalized_text, mean_confidence)`.
-        """
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if not pcm_bytes:
             return False, "", 0.0
         if self.is_tts_speaking and not allow_during_tts:
@@ -478,11 +383,7 @@ class VoskSTT:
                 if not raw_text:
                     return False, "", 0.0
 
-<<<<<<< HEAD
                 if (self.is_tts_speaking or (time.monotonic() - self._tts_finished_ts) < 1.0) and self.is_likely_tts_echo(raw_text):
-=======
-                if (self.is_tts_speaking or (time.monotonic() - self._tts_finished_ts) < 1.2) and self.is_likely_tts_echo(raw_text):
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                     try:
                         rec.Reset()
                     except Exception:
@@ -508,11 +409,7 @@ class VoskSTT:
                 partial_raw = str(part.get("partial", "")).strip()
                 if not partial_raw:
                     return False, "", 0.0
-<<<<<<< HEAD
                 if (self.is_tts_speaking or (time.monotonic() - self._tts_finished_ts) < 1.0) and self.is_likely_tts_echo(partial_raw):
-=======
-                if (self.is_tts_speaking or (time.monotonic() - self._tts_finished_ts) < 1.2) and self.is_likely_tts_echo(partial_raw):
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                     return False, "", 0.0
 
                 norm_partial = normalize_indian_english_transcript(partial_raw)
@@ -532,10 +429,6 @@ class VoskSTT:
         recognizer: Optional[Any] = None,
         allow_during_tts: bool = False,
     ) -> Tuple[bool, str]:
-<<<<<<< HEAD
-=======
-        """Backwards-compatible wrapper returning `(is_final, text)`."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         is_final, text, _ = self.feed_pcm_chunk_detailed(
             pcm_bytes, recognizer=recognizer, allow_during_tts=allow_during_tts
         )
@@ -577,13 +470,6 @@ class VoskSTT:
         stop_check: Callable[[], bool],
         on_raw_chunk: Optional[Callable[[bytes], None]] = None,
     ):
-<<<<<<< HEAD
-=======
-        """
-        Generator yielding 16-bit 16kHz mono PCM byte chunks from `sounddevice`
-        (preferred on Windows) or `PyAudio`.
-        """
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if SOUNDDEVICE_AVAILABLE and sd is not None:
             q: "queue.Queue[bytes]" = queue.Queue()
 

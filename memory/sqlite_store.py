@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
 """
-<<<<<<< HEAD
 E.V. (Enhanced Virtual Assistant) — Centralized SQLite Knowledge Base & Self-Learning Store
 ===========================================================================================
 Persistent WAL-mode SQLite3 database (`data/memory.db`) storing all personal
 identity, friends/family contacts, self-learned rules/corrections, behavioral
 preferences ("don't do X"), and conversation history strictly inside SQLite
 (zero personal data in `config.yaml` or source code).
-=======
-E.V. (Enhanced Virtual Assistant) — Centralized SQLite Knowledge Base
-=====================================================================
-Persistent WAL-mode SQLite3 database (`data/memory.db`) storing all personal
-identity, friends/family contacts, preferences, and conversation history
-strictly inside the local SQLite database (zero personal data in `config.yaml`
-or source code).
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
 Tables:
   1. `user_profile`:
      - `field_key` (TEXT PRIMARY KEY): `full_name`, `nickname`, `birthday`,
        `mobile`, `email`, `instagram`, `address`, `preferences`, etc.
-<<<<<<< HEAD
   2. `contacts`:
      - `id`, `name`, `nickname`, `relationship`, `phone`, `whatsapp`, `instagram`,
        `birthday`, `notes`, `created_at`, `updated_at`
@@ -32,17 +22,6 @@ Tables:
   4. `preferences` & `conversation_history` & `message_history`:
      - Key-value user preferences (including negative constraints like `dont_do:...`)
        and turn-by-turn conversation logs.
-=======
-     - `field_value` (TEXT), `updated_at` (REAL)
-  2. `contacts`:
-     - `id` (INTEGER PRIMARY KEY AUTOINCREMENT)
-     - `name`, `nickname`, `relationship`, `phone`, `whatsapp`, `instagram`,
-       `birthday`, `notes`, `created_at`, `updated_at`
-  3. `message_history`:
-     - Outbound/inbound WhatsApp and SMS log for "What was the last message I sent to Arin?"
-  4. `preferences` & `conversation_history`:
-     - Key-value user preferences and turn-by-turn conversation logs.
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 """
 
 from __future__ import annotations
@@ -90,10 +69,6 @@ class ContactRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
 
-<<<<<<< HEAD
-=======
-    # Backwards-compatible property aliases
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     @property
     def mobile_number(self) -> str:
         return self.phone
@@ -110,12 +85,8 @@ class ContactRecord:
 class SQLiteMemoryStore:
     """
     Thread-safe SQLite3 personal knowledge base managing `user_profile`,
-<<<<<<< HEAD
     `contacts`, `learned_knowledge`, `message_history`, `preferences`,
     and `conversation_history`.
-=======
-    `contacts`, `message_history`, `preferences`, and `conversation_history`.
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     """
 
     PROFILE_FIELD_ALIASES: Dict[str, str] = {
@@ -123,10 +94,7 @@ class SQLiteMemoryStore:
         "full name": "full_name",
         "my name": "full_name",
         "nickname": "nickname",
-<<<<<<< HEAD
         "call me": "nickname",
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         "age": "age",
         "birthday": "birthday",
         "date of birth": "birthday",
@@ -159,19 +127,11 @@ class SQLiteMemoryStore:
     }
 
     RELATIONSHIP_SYNONYMS: Dict[str, List[str]] = {
-<<<<<<< HEAD
         "mother": ["mom", "mother", "mum", "mummy", "mommy", "mammi", "mami", "maa", "ma", "ammi", "mataji"],
         "father": ["dad", "father", "daddy", "papa", "papaji", "pitaji", "pop", "abba"],
         "brother": ["brother", "bro", "bhaiya", "bhai"],
         "sister": ["sister", "sis", "didi", "di"],
         "friend": ["friend", "best friend", "buddy", "dost"],
-=======
-        "mother": ["mom", "mother", "mum", "mummy", "ma"],
-        "father": ["dad", "father", "papa", "pop"],
-        "brother": ["brother", "bro"],
-        "sister": ["sister", "sis"],
-        "friend": ["friend", "best friend", "buddy"],
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         "colleague": ["colleague", "coworker", "teammate"],
     }
 
@@ -212,11 +172,7 @@ class SQLiteMemoryStore:
                     """
                 )
 
-<<<<<<< HEAD
                 # 2. contacts table
-=======
-                # 2. contacts table (with created_at and updated_at)
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS contacts (
@@ -234,10 +190,6 @@ class SQLiteMemoryStore:
                     )
                     """
                 )
-<<<<<<< HEAD
-=======
-                # Ensure columns exist if upgrading an older table
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 existing_cols = {
                     str(r["name"]).lower()
                     for r in conn.execute("PRAGMA table_info(contacts)").fetchall()
@@ -252,7 +204,6 @@ class SQLiteMemoryStore:
                     if col_name not in existing_cols:
                         conn.execute(f"ALTER TABLE contacts ADD COLUMN {col_name} {col_def}")
 
-<<<<<<< HEAD
                 # 3. learned_knowledge table (Self-Learning, Corrections & Habits)
                 conn.execute(
                     """
@@ -268,9 +219,6 @@ class SQLiteMemoryStore:
                 )
 
                 # 4. message_history table
-=======
-                # 3. message_history table
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS message_history (
@@ -284,11 +232,7 @@ class SQLiteMemoryStore:
                     """
                 )
 
-<<<<<<< HEAD
                 # 5. preferences table
-=======
-                # 4. preferences table
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS preferences (
@@ -300,11 +244,7 @@ class SQLiteMemoryStore:
                     """
                 )
 
-<<<<<<< HEAD
                 # 6. conversation_history table
-=======
-                # 5. conversation_history table
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS conversation_history (
@@ -373,22 +313,12 @@ class SQLiteMemoryStore:
     # 2. Friends, Family & Contacts Methods (`contacts`)
     # =========================================================================
     def add_or_update_contact(self, name: str, **kwargs: Any) -> ContactRecord:
-<<<<<<< HEAD
-=======
-        """
-        Insert a new contact or update an existing contact's fields in SQLite.
-        Accepts `nickname`, `relationship`, `phone` (or `mobile_number`),
-        `whatsapp` (or `whatsapp_number`), `instagram` (or `instagram_username`),
-        `birthday`, and `notes`.
-        """
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         clean_name = (name or "").strip()
         if not clean_name:
             raise ValueError("Contact name cannot be empty")
 
         nickname = str(kwargs.get("nickname") or "").strip()
         relationship = str(kwargs.get("relationship") or "").strip().lower()
-<<<<<<< HEAD
         # Automatically infer mother/father relationship when name is Mom/Mummy/Dad/Papa
         if not relationship:
             if clean_name.lower() in self.RELATIONSHIP_SYNONYMS["mother"]:
@@ -400,8 +330,6 @@ class SQLiteMemoryStore:
                 if clean_name.lower() in ("daddy", "papa", "papaji"):
                     clean_name = "Dad"
 
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         phone = str(kwargs.get("phone") or kwargs.get("mobile_number") or "").strip()
         whatsapp = str(kwargs.get("whatsapp") or kwargs.get("whatsapp_number") or phone).strip()
         instagram = str(
@@ -459,29 +387,14 @@ class SQLiteMemoryStore:
         found = self.get_contact(clean_name)
         return found if found is not None else ContactRecord(id=cid, name=clean_name)
 
-<<<<<<< HEAD
-=======
-    # Alias for backwards compatibility
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     def upsert_contact(self, name: str, **kwargs: Any) -> ContactRecord:
         return self.add_or_update_contact(name, **kwargs)
 
     def get_contact(self, name_or_relationship: str) -> Optional[ContactRecord]:
-<<<<<<< HEAD
-=======
-        """Return the top matching contact by name, nickname, or relationship."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         matches = self.search_contacts(name_or_relationship)
         return matches[0] if matches else None
 
     def search_contacts(self, query: str) -> List[ContactRecord]:
-<<<<<<< HEAD
-=======
-        """
-        Search contacts by exact name, nickname, relationship ('Mom', 'my mother',
-        'friend', 'brother'), or substring.
-        """
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         cleaned = re.sub(r"^(?:my|the)\s+", "", (query or "").strip(), flags=re.I).strip()
         if not cleaned:
             return []
@@ -504,11 +417,7 @@ class SQLiteMemoryStore:
         if exact:
             return exact
 
-<<<<<<< HEAD
         # 2. Exact relationship or synonym match (e.g. "mummy" / "mommy" / "mother" <-> "Mom")
-=======
-        # 2. Exact relationship or synonym match (e.g. "Mom" <-> "mother")
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         rel_matches = [
             c
             for c in all_contacts
@@ -528,18 +437,10 @@ class SQLiteMemoryStore:
             or (c.instagram and q_low == c.instagram.lower())
         ]
 
-<<<<<<< HEAD
-=======
-    # Alias for backwards compatibility
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     def find_contacts(self, query: str) -> List[ContactRecord]:
         return self.search_contacts(query)
 
     def list_contacts(self, relationship: Optional[str] = None) -> List[ContactRecord]:
-<<<<<<< HEAD
-=======
-        """Return all contacts, optionally filtered by `relationship`."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute("SELECT * FROM contacts ORDER BY name ASC").fetchall()
@@ -571,7 +472,6 @@ class SQLiteMemoryStore:
 
     def update_contact_field(self, person_query: str, field_name: str, value: str) -> Tuple[bool, str]:
         existing = self.get_contact(person_query)
-<<<<<<< HEAD
         if existing:
             target_name = existing.name
         else:
@@ -582,9 +482,6 @@ class SQLiteMemoryStore:
                 target_name = "Dad"
             else:
                 target_name = person_query.strip().title()
-=======
-        target_name = existing.name if existing else person_query.strip().title()
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
         f_low = field_name.lower().strip()
         kwargs: Dict[str, Any] = {}
@@ -611,7 +508,6 @@ class SQLiteMemoryStore:
         return True, f"Updated {rec.name}'s {field_name} to {value.strip()}."
 
     # =========================================================================
-<<<<<<< HEAD
     # 3. Self-Learning & Corrections (`learned_knowledge`)
     # =========================================================================
     def add_learned_knowledge(
@@ -700,9 +596,6 @@ class SQLiteMemoryStore:
 
     # =========================================================================
     # 4. Message History (`message_history`)
-=======
-    # 3. Message History (`message_history`)
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     # =========================================================================
     def log_message(
         self,
@@ -754,11 +647,7 @@ class SQLiteMemoryStore:
                 return dict(row) if row else None
 
     # =========================================================================
-<<<<<<< HEAD
     # 5. General Preferences & Conversation History
-=======
-    # 4. General Preferences & Conversation History
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     # =========================================================================
     def set_preference(self, key: str, value: str, category: str = "general") -> None:
         clean_k = (key or "").strip().lower()
@@ -790,7 +679,6 @@ class SQLiteMemoryStore:
                 ).fetchone()
                 return str(row["value"]) if row else default
 
-<<<<<<< HEAD
     def list_preferences(self, limit: int = 20, category: Optional[str] = None) -> Dict[str, str]:
         with self._lock:
             with self._connect() as conn:
@@ -817,21 +705,6 @@ class SQLiteMemoryStore:
         tokens = [t for t in raw_words if len(t) >= 3 and t not in stopwords]
         if not tokens:
             return []
-=======
-    def list_preferences(self, limit: int = 20) -> Dict[str, str]:
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT key, value FROM preferences ORDER BY updated_at DESC LIMIT ?",
-                    (max(1, limit),),
-                ).fetchall()
-                return {str(r["key"]): str(r["value"]) for r in rows}
-
-    def search_facts(self, query: str, limit: int = 5) -> List[Tuple[str, str]]:
-        tokens = [t.strip().lower() for t in (query or "").split() if len(t.strip()) >= 2]
-        if not tokens:
-            return list(self.list_preferences(limit=limit).items())
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
         results: List[Tuple[str, str]] = []
         with self._lock:
@@ -871,12 +744,4 @@ class SQLiteMemoryStore:
                     """,
                     (max(1, limit),),
                 ).fetchall()
-<<<<<<< HEAD
                 return [dict(r) for r in reversed(rows)]
-=======
-                return [dict(r) for r in reversed(rows)]
-
-
-# Alias for backwards compatibility
-SQLiteStore = SQLiteMemoryStore
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b

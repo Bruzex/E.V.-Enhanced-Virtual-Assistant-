@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-<<<<<<< HEAD
 E.V. (Enhanced Virtual Assistant) — Personal Knowledge Base, RAG & Self-Learning Engine (`rag.py`)
 ==================================================================================================
 Provides:
@@ -20,18 +19,6 @@ Provides:
   3. Safe RAG Context Injection (`build_context_for_prompt`):
      - Automatically injects relevant learned facts, rules, and preferences into `Brain`
        without ever triggering accidental profile dumps on unrelated questions.
-=======
-E.V. (Enhanced Virtual Assistant) — High-Level Personal Knowledge Base & RAG API
-================================================================================
-Provides the high-level Personal Companion API requested in specification:
-  - `set_my_profile_field(field, value)`
-  - `get_my_profile_field(field)`
-  - `get_full_profile()`
-  - `add_or_update_contact(name, **kwargs)`
-  - `get_contact(name)`
-  - `search_contacts(query)`
-  - `list_contacts(relationship=None)`
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 """
 
 from __future__ import annotations
@@ -46,7 +33,6 @@ from memory.sqlite_store import ContactRecord, SQLiteMemoryStore
 
 
 AUTO_LEARN_PATTERNS = [
-<<<<<<< HEAD
     (re.compile(r"^(?:remember\s+that\s+|actually\s+)?my\s+(?:full\s+)?name\s+is\s+(?P<val>[a-zA-Z0-9\s]{2,40})$", re.I), "full_name"),
     (re.compile(r"^(?:remember\s+that\s+|from\s+now\s+on\s+)?(?:my\s+nickname\s+is|call\s+me)\s+(?P<val>[a-zA-Z0-9\s]{2,25})$", re.I), "nickname"),
     (re.compile(r"^(?:remember\s+that\s+|actually\s+)?my\s+(?:mobile|phone|cell)(?:\s+number)?\s+is\s+(?P<val>[\+\d\s\-\(\)]{5,25})$", re.I), "mobile"),
@@ -57,28 +43,12 @@ AUTO_LEARN_PATTERNS = [
     (re.compile(r"^(?:remember\s+that\s+|actually\s+)?i\s+live\s+in\s+(?P<val>[a-zA-Z0-9\s,]{2,50})$", re.I), "address"),
     (re.compile(r"^(?:remember\s+that\s+|actually\s+)?my\s+(?:home\s+)?address\s+is\s+(?P<val>[a-zA-Z0-9\s,\-#]{3,70})$", re.I), "address"),
     (re.compile(r"^(?:remember\s+that\s+|actually\s+)?my\s+(?P<key>[a-zA-Z0-9\s]{2,25}?)\s+is\s+(?P<val>[^.?!]{2,60})$", re.I), None),
-=======
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+(?:full\s+)?name\s+is\s+(?P<val>[a-zA-Z0-9\s]{2,40})$", re.I), "full_name"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+nickname\s+is\s+(?P<val>[a-zA-Z0-9\s]{2,25})$", re.I), "nickname"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+(?:mobile|phone|cell)(?:\s+number)?\s+is\s+(?P<val>[\+\d\s\-\(\)]{5,25})$", re.I), "mobile"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+email(?:\s+address)?\s+is\s+(?P<val>[^\s]+@[^\s]+)$", re.I), "email"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+instagram(?:\s+username|\s+handle|\s+id)?\s+is\s+@?(?P<val>[a-zA-Z0-9._]{2,35})$", re.I), "instagram"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+(?:birthday|date\s+of\s+birth|dob)\s+is\s+(?P<val>[a-zA-Z0-9\s,\-/]{3,35})$", re.I), "birthday"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+age\s+is\s+(?P<val>\d{1,3})$", re.I), "age"),
-    (re.compile(r"^(?:remember\s+that\s+)?i\s+live\s+in\s+(?P<val>[a-zA-Z0-9\s,]{2,50})$", re.I), "address"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+(?:home\s+)?address\s+is\s+(?P<val>[a-zA-Z0-9\s,\-#]{3,70})$", re.I), "address"),
-    (re.compile(r"^(?:remember\s+that\s+)?my\s+(?P<key>[a-zA-Z0-9\s]{2,25}?)\s+is\s+(?P<val>[^.?!]{2,60})$", re.I), None),
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 ]
 
 
 class RAGMemoryManager:
     """
-<<<<<<< HEAD
     Centralized Personal Companion Knowledge Base, RAG & Self-Learning Manager.
-=======
-    Centralized Personal Companion Knowledge Base & RAG Manager.
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     """
 
     def __init__(self, config: Dict[str, Any], base_dir: Path) -> None:
@@ -100,15 +70,11 @@ class RAGMemoryManager:
             return "Please provide a valid profile field and value."
         clean_v = value.strip()
         self.sqlite.set_preference(f"your {norm}", clean_v, category="user_profile")
-<<<<<<< HEAD
         self.sqlite.add_learned_knowledge(f"profile:{norm}", f"User's {norm.replace('_', ' ')} is {clean_v}", source_type="fact")
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         self.chroma.add_memory(f"User profile {norm} is {clean_v}", metadata={"key": norm})
         friendly = norm.replace("_", " ").replace("full name", "name")
         if norm == "instagram" and not clean_v.startswith("@"):
             return f"Got it. I've saved your Instagram as @{clean_v}."
-<<<<<<< HEAD
         if norm == "nickname":
             return f"Got it. From now on, I'll call you {clean_v}."
         return f"Got it. I've saved your {friendly} as {clean_v}."
@@ -129,20 +95,6 @@ class RAGMemoryManager:
         return ""
 
     def query_my_profile(self, field_query: str) -> str:
-=======
-        return f"Got it. I've saved your {friendly} as {clean_v}."
-
-    def get_my_profile_field(self, field: str) -> Optional[str]:
-        """Retrieve a raw personal profile field value from SQLite (`user_profile`)."""
-        return self.sqlite.get_profile_field(field)
-
-    def get_full_profile(self) -> Dict[str, str]:
-        """Return all stored personal profile fields as a dictionary."""
-        return self.sqlite.get_full_profile()
-
-    def query_my_profile(self, field_query: str) -> str:
-        """Format a natural spoken answer for 'What's my Instagram?', 'What's my phone number?', etc."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         norm = self.sqlite.normalize_profile_key(field_query)
         val = self.get_my_profile_field(norm)
 
@@ -171,10 +123,6 @@ class RAGMemoryManager:
     # High-Level Contacts API (`contacts`)
     # =========================================================================
     def add_or_update_contact(self, name: str, **kwargs: Any) -> ContactRecord:
-<<<<<<< HEAD
-=======
-        """Add or update a friend, family member, or colleague in the `contacts` table."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         rec = self.sqlite.add_or_update_contact(name, **kwargs)
         summary = f"Contact {rec.name} ({rec.relationship or 'contact'})"
         if rec.phone:
@@ -185,52 +133,28 @@ class RAGMemoryManager:
         return rec
 
     def get_contact(self, name: str) -> Optional[ContactRecord]:
-<<<<<<< HEAD
         return self.sqlite.get_contact(name)
 
     def search_contacts(self, query: str) -> List[ContactRecord]:
         return self.sqlite.search_contacts(query)
 
     def list_contacts(self, relationship: Optional[str] = None) -> List[ContactRecord]:
-=======
-        """Retrieve a single contact by name, nickname, or relationship ('Mom', 'Arin')."""
-        return self.sqlite.get_contact(name)
-
-    def search_contacts(self, query: str) -> List[ContactRecord]:
-        """Search contacts by name, nickname, or relationship."""
-        return self.sqlite.search_contacts(query)
-
-    def list_contacts(self, relationship: Optional[str] = None) -> List[ContactRecord]:
-        """List all saved contacts, optionally filtered by relationship."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         return self.sqlite.list_contacts(relationship=relationship)
 
     def resolve_contact_or_disambiguate(
         self,
         person_query: str,
     ) -> Tuple[Optional[ContactRecord], Optional[str]]:
-<<<<<<< HEAD
         clean_q = re.sub(r"^(?:my|to|for)\s+", "", (person_query or "").strip(), flags=re.I).strip()
         matches = self.search_contacts(clean_q)
-=======
-        matches = self.search_contacts(person_query)
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if len(matches) == 1:
             return matches[0], None
         if len(matches) > 1:
             names = ", ".join(f"{c.name} ({c.relationship or 'contact'})" for c in matches[:4])
-<<<<<<< HEAD
             return None, f"I found multiple contacts matching '{clean_q}': {names}. Which one did you mean?"
         return None, f"I don't have {clean_q} saved in your contacts yet."
 
     def describe_person(self, person_query: str) -> str:
-=======
-            return None, f"I found multiple contacts matching '{person_query}': {names}. Which one did you mean?"
-        return None, f"I don't have {person_query} saved in your contacts yet."
-
-    def describe_person(self, person_query: str) -> str:
-        """Format a natural spoken response for 'Who is Arin?'."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         contact, err = self.resolve_contact_or_disambiguate(person_query)
         if err:
             return err
@@ -261,10 +185,6 @@ class RAGMemoryManager:
         return f"{head}."
 
     def query_contact_attribute(self, person_query: str, attribute: str) -> str:
-<<<<<<< HEAD
-=======
-        """Answer 'What's Arin's phone number?', 'What's Mom's number?', 'What is Arin's Instagram?'."""
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         contact, err = self.resolve_contact_or_disambiguate(person_query)
         if err:
             return f"I don't have {person_query} saved in your contacts yet."
@@ -301,11 +221,7 @@ class RAGMemoryManager:
         return self.describe_person(person_query)
 
     # =========================================================================
-<<<<<<< HEAD
     # Message History & Natural Self-Learning Engine (Requirement 6)
-=======
-    # Message History & Natural Fact Teaching
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     # =========================================================================
     def record_sent_message(self, contact_name: str, platform: str, message_text: str) -> None:
         self.sqlite.log_message(contact_name, platform=platform, message_text=message_text, direction="outgoing")
@@ -320,7 +236,6 @@ class RAGMemoryManager:
             return f"The last message you sent to {row['contact_name']} on {plat} was: '{msg}'."
         return f"I don't have any recorded messages sent to {target_name} yet."
 
-<<<<<<< HEAD
     def learn_rule_or_correction(self, statement: str, source_type: str = "rule") -> str:
         """
         Store a user-taught rule, correction, or habit permanently in SQLite + ChromaDB:
@@ -434,18 +349,12 @@ class RAGMemoryManager:
 
         return "Here is what I know about you: " + ", ".join(parts) + "."
 
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     def remember_fact(self, key: str, value: str, category: str = "user_note") -> str:
         clean_k = (key or "note").strip()
         clean_v = (value or "").strip()
         if not clean_v:
             return "Please tell me what you'd like me to remember."
 
-<<<<<<< HEAD
-=======
-        # Check if teaching a contact's attribute: "Remember that Mom's WhatsApp number is +91..."
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         m_contact = re.match(
             r"^(?P<person>[a-zA-Z0-9\s]+?)'s\s+(?P<attr>whatsapp(?:\s+number)?|phone(?:\s+number)?|mobile(?:\s+number)?|number|instagram(?:\s+username)?|birthday)$",
             clean_k,
@@ -459,10 +368,6 @@ class RAGMemoryManager:
             )
             return msg
 
-<<<<<<< HEAD
-=======
-        # Check if teaching own profile field: "Remember that my name is Aditya Raj"
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if clean_k.lower().startswith("my "):
             field_part = clean_k[3:].strip()
             norm_prof = self.sqlite.normalize_profile_key(field_part)
@@ -481,32 +386,19 @@ class RAGMemoryManager:
 
         low_k = clean_k.lower()
         self.sqlite.set_preference(low_k, clean_v, category=category)
-<<<<<<< HEAD
         self.sqlite.add_learned_knowledge(low_k, f"{clean_k} is {clean_v}", source_type="fact")
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         self.chroma.add_memory(f"{low_k} is {clean_v}", metadata={"key": low_k, "category": category})
         return f"Got it. I'll remember that {clean_k} is {clean_v}."
 
     def auto_learn_from_statement(self, user_text: str) -> Optional[str]:
         """
-<<<<<<< HEAD
         Automatically detect and persist personal facts, contact updates, user corrections,
         and behavioral preferences from natural speech.
-=======
-        Parse natural teaching statements for both self profile and contacts:
-          - "Arin is my friend, his number is +91 9876543210"
-          - "Remember that Mom's WhatsApp number is +91 9999988888"
-          - "Update Arin's Instagram to @arin_dev"
-          - "My Instagram is @bruprog"
-          - "Remember that my name is Aditya Raj"
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         """
         if not self.enabled:
             return None
         cleaned = (user_text or "").strip().rstrip(".?!")
         low = cleaned.lower()
-<<<<<<< HEAD
         if low.startswith(("what ", "who ", "where ", "when ", "why ", "how ", "is ", "can ", "do you ", "are you ")):
             return None
 
@@ -520,14 +412,6 @@ class RAGMemoryManager:
         # 1. Compound contact teaching: "Arin is my friend, his number is +91 9876543210"
         m_compound = re.search(
             r"^(?:remember\s+that\s+|actually\s+)?(?P<person>[a-zA-Z0-9]+)\s+is\s+my\s+(?P<rel>friend|best\s+friend|brother|sister|mother|father|mom|mummy|dad|colleague|cousin)"
-=======
-        if low.startswith(("what ", "who ", "where ", "when ", "why ", "how ", "is ", "can ", "do ")):
-            return None
-
-        # 1. Compound contact teaching: "Arin is my friend, his number is +91 9876543210"
-        m_compound = re.search(
-            r"^(?:remember\s+that\s+)?(?P<person>[a-zA-Z0-9]+)\s+is\s+my\s+(?P<rel>friend|best\s+friend|brother|sister|mother|father|mom|dad|colleague|cousin)"
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             r"(?:[\s,;]+(?:and\s+)?(?:his|her|their)\s+(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram)\s+is\s+(?P<val>.+))?$",
             cleaned,
             re.I,
@@ -556,11 +440,7 @@ class RAGMemoryManager:
 
         # 2. Contact attribute update: "Update Arin's Instagram to @arin_dev" / "Remember that Mom's WhatsApp number is ..."
         m_update = re.search(
-<<<<<<< HEAD
             r"^(?:update|set|change|remember\s+that|actually)\s+(?P<person>[a-zA-Z0-9\s]+?)'s\s+"
-=======
-            r"^(?:update|set|change|remember\s+that)\s+(?P<person>[a-zA-Z0-9\s]+?)'s\s+"
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             r"(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|phone|whatsapp|instagram(?:\s+username)?|birthday)"
             r"\s+(?:to|is|as)\s+(?P<val>.+)$",
             cleaned,
@@ -574,11 +454,7 @@ class RAGMemoryManager:
             )
             return msg
 
-<<<<<<< HEAD
         # 3. Direct contact possessive statement: "Arin's phone number is ..." / "Mom's number is ..."
-=======
-        # 3. Direct contact possessive statement: "Arin's phone number is ..."
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         m_cattr = re.search(
             r"^(?P<person>[a-zA-Z0-9]+)'s\s+(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|instagram|birthday)\s+is\s+(?P<val>.+)$",
             cleaned,
@@ -592,11 +468,7 @@ class RAGMemoryManager:
             )
             return msg
 
-<<<<<<< HEAD
         # 4. Self profile teaching patterns ("Remember that my name is Aditya Raj", "From now on call me Boss")
-=======
-        # 4. Self profile teaching patterns ("Remember that my name is Aditya Raj", "My Instagram is @bruprog")
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         for pattern, profile_field in AUTO_LEARN_PATTERNS:
             m = pattern.search(cleaned)
             if m:
@@ -614,10 +486,7 @@ class RAGMemoryManager:
 
                 key = f"your {raw_key}"
                 self.sqlite.set_preference(key, val, category="auto_learned")
-<<<<<<< HEAD
                 self.sqlite.add_learned_knowledge(raw_key, f"User's {raw_key} is {val}", source_type="fact")
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 self.chroma.add_memory(f"{key} is {val}", metadata={"key": key, "category": "auto_learned"})
                 return f"I've noted that your {raw_key} is {val}."
         return None
@@ -640,11 +509,7 @@ class RAGMemoryManager:
                     return f"Your {subject} is {val}."
 
         matches = self.sqlite.search_facts(cleaned, limit=1)
-<<<<<<< HEAD
         if matches and any(w in cleaned for w in ("my ", "remember", "told you", "learned")):
-=======
-        if matches and any(w in cleaned for w in ("my ", "remember", "told you")):
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             k, v = matches[0]
             return f"You mentioned earlier that {k} is {v}."
         return None
@@ -654,14 +519,11 @@ class RAGMemoryManager:
         if direct:
             return direct
 
-<<<<<<< HEAD
         learned_matches = self.sqlite.search_learned_knowledge(query, limit=3)
         if learned_matches:
             joined = "; ".join(str(m["fact_text"]) for m in learned_matches)
             return f"From what you taught me: {joined}."
 
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         sql_matches = self.sqlite.search_facts(query, limit=3)
         if sql_matches:
             formatted = "; ".join(f"{k} is {v}" for k, v in sql_matches)
@@ -687,19 +549,15 @@ class RAGMemoryManager:
         return None
 
     def build_context_for_prompt(self, user_prompt: str) -> str:
-<<<<<<< HEAD
         """
         Build a concise RAG context block injected into the local LLM system prompt
         containing relevant learned facts, user habits, and preferences.
         """
-=======
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if not self.enabled:
             return ""
 
         lines: List[str] = []
         prof = self.get_full_profile()
-<<<<<<< HEAD
         if prof.get("nickname") or prof.get("full_name"):
             preferred = prof.get("nickname") or prof.get("full_name")
             lines.append(f"- Preferred way to address user: {preferred}")
@@ -712,10 +570,6 @@ class RAGMemoryManager:
         # Include topic-relevant learned knowledge
         for item in self.sqlite.search_learned_knowledge(user_prompt, limit=3):
             lines.append(f"- Learned knowledge ({item['source_type']}): {item['fact_text']}")
-=======
-        if prof.get("full_name"):
-            lines.append(f"- User Name: {prof['full_name']} (Nickname: {prof.get('nickname', '')})")
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
         for k, v in self.sqlite.search_facts(user_prompt, limit=3):
             lines.append(f"- User fact ({k}): {v}")
@@ -743,20 +597,8 @@ class RAGMemoryManager:
         self.sqlite.log_turn(u_clean, a_clean, intent_name=intent_name)
         self.auto_learn_from_statement(u_clean)
 
-<<<<<<< HEAD
         if intent_name not in ("empty", "wake_acknowledge", "continue_speech", "interrupt_speech") and len(u_clean) >= 6:
             self.chroma.add_memory(
                 f"User said: '{u_clean}'. E.V. responded: '{a_clean}'.",
                 metadata={"intent": intent_name},
             )
-=======
-        if intent_name not in ("empty", "continue_speech", "interrupt_speech") and len(u_clean) >= 6:
-            self.chroma.add_memory(
-                f"User said: '{u_clean}'. E.V. responded: '{a_clean}'.",
-                metadata={"intent": intent_name},
-            )
-
-
-# Alias for backwards compatibility
-MemoryRAG = RAGMemoryManager
->>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
