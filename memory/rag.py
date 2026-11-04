@@ -32,17 +32,6 @@ from memory.chroma_store import ChromaMemoryStore
 from memory.sqlite_store import ContactRecord, SQLiteMemoryStore
 
 
-
-def normalize_phone_digits(raw: str) -> str:
-    """Normalize phone string, preserving leading + if present."""
-    if not raw:
-        return ""
-    text = str(raw).strip()
-    has_plus = text.startswith("+")
-    digits = re.sub(r"\D", "", text)
-    return f"+{digits}" if has_plus else digits
-
-
 AUTO_LEARN_PATTERNS = [
     (re.compile(r"^(?:remember\s+that\s+|actually\s+)?my\s+(?:full\s+)?name\s+is\s+(?P<val>[a-zA-Z0-9\s]{2,40})$", re.I), "full_name"),
     (re.compile(r"^(?:remember\s+that\s+|from\s+now\s+on\s+)?(?:my\s+nickname\s+is|call\s+me)\s+(?P<val>[a-zA-Z0-9\s]{2,25})$", re.I), "nickname"),

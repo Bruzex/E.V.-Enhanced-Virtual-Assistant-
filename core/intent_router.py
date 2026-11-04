@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-E.V. (Enhanced Virtual Assistant) — Hybrid Fast-Path, Multi-Step Planner & LLM Intent Router (`core/intent_router.py`)
-======================================================================================================================
+E.V. (Enhanced Virtual Assistant) — Unambiguous Fast-Path & LLM Intent Router (`core/intent_router.py`)
+=======================================================================================================
 Implements:
-  1. Unambiguous Fast-Path Selection & Strict "Who Are You" Rule:
-     - Only executes deterministic rules when the command is an explicit action.
-     - Conversational questions like "how are you?" or "she is not working" are never
-       hijacked by the identity rule or volume/clock rules.
-  2. Multi-Step Task Planner for WhatsApp & Calls:
-     - Resolves contact from SQLite (`name`, `nickname`, `relationship`, `"Mommy"` -> `"Mom"`).
-     - If missing phone/WhatsApp number, asks once and remembers pending message so the
-       user can simply speak the number on the next turn.
-     - Publishes step-by-step progress to the HUD (`Topics.ORB_STATE` + `Topics.WORKSPACE_PROGRESS`),
-       opens WhatsApp (desktop URI or ADB), selects contact, types message, and sends.
-  3. Coding Capability (`data/workspace/code/`):
-     - Generates HTML/CSS/JS, React, or Python code via `Brain.generate_code()`, saves to
-       `data/workspace/code/<filename>`, speaks a concise confirmation, and optionally opens
-       in browser or VS Code.
-  4. Silent Background Web Search (DuckDuckGo):
-     - Answers factual world questions ("what is the capital of...", "what is the richest
-       country...", "who is the CEO of...") silently in the background in 1–2 sentences
-       without opening a browser window.
-  5. Short-Term Context & Coreference Resolution:
-     - Tracks last N turns and active entities (`person`, `app`, `file`, `assistant="E.V."`).
-     - Resolves pronouns (`"she"`, `"her"`, `"he"`, `"him"`, `"it"`, `"that"`) accurately.
+  1. Unambiguous Fast-Path Selection:
+     - Only executes deterministic rules when the command is an explicit, unambiguous
+       action (`workspace_launch`, `workspace_selective_launch`, `workspace_undo`,
+       `timed_command`, `timer_control`, `volume_control`, `whatsapp_action`,
+       `phone_call`, `phone_adb_control`, `instagram_action`, `contact_management`,
+       `personal_profile_query`, `assistant_identity`).
+     - Conversational remarks containing words like "each time you increase the volume"
+       or "you increase the volume from yourself" are never mistaken for volume or clock commands.
+  2. Precise Volume & Timer Parsing:
+     - Converts number words (`ten`, `thirty`, `hundred`) to digits before matching.
+     - `"increase the volume to 100 percent"` / `"set volume to 100 percent"` sets `100`
+       and replies `"Volume set to 100 percent."`
+     - `"increase the volume by 10 percent"` steps by `+10` and replies
+       `"Volume increased by 10 percent."`
+     - `"set a/the timer for/of/off ten seconds"` schedules a real 10-second countdown
+       and displays it on the right HUD panel.
+  3. Structured Turn Logging:
+     - Logs every routed turn as `FAST:<rule>`, `LLM:<ms>ms`, or `FALLBACK_NO_MODEL`.
 """
 
 from __future__ import annotations
@@ -31,30 +28,16 @@ from __future__ import annotations
 import logging
 import os
 import re
-import subprocess
 import time
 import urllib.parse
 import webbrowser
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Pattern, Tuple
+from typing import Any, Callable, Dict, List, Optional, Pattern
 
 from core.event_bus import EventBus, Topics, get_event_bus
 from memory.sqlite_store import mask_pii
 from voice.stt import VoskSTT, convert_spoken_numbers
-
-
-def normalize_phone_digits(raw: str) -> str:
-    """Normalize phone string, preserving leading + if present."""
-    if not raw:
-        return ""
-    text = str(raw).strip()
-    has_plus = text.startswith("+")
-    digits = re.sub(r"\D", "", text)
-    return f"+{digits}" if has_plus else digits
-
 
 
 @dataclass
@@ -127,21 +110,12 @@ _WAKE_OR_NOISE_ONLY = {
     "e the",
 }
 
-_FEMALE_RELATIONS = {"mother", "mom", "mummy", "mommy", "mammi", "mami", "maa", "sister", "sis", "didi"}
-_MALE_RELATIONS = {"father", "dad", "daddy", "papa", "papaji", "brother", "bro", "bhaiya", "bhai"}
-
-_FACTUAL_QUESTION_PATTERN = re.compile(
-    r"^(?:what\s+(?:is|are|was)\s+the\s+(?:capital|population|currency|president|prime\s+minister|richest|largest|smallest|tallest|highest|longest|deepest|fastest|oldest|distance|meaning|definition|weather|temperature|gdp)\b|"
-    r"who\s+(?:is|was)\s+(?:the\s+)?(?:president|prime\s+minister|ceo|founder|creator|inventor|author|director|king|queen|richest\s+person)\s+of\b|"
-    r"where\s+is\s+[a-z0-9\s]+\s+located\b)",
-    re.IGNORECASE,
-)
-
 
 class IntentRouter:
     """
-    JARVIS-style Hybrid Intent Router with Multi-Step Task Planning, Coding Generation,
-    Silent Factual Web Search, and Short-Term Coreference Resolution.
+    JARVIS-style Hybrid Intent Router.
+    Executes unambiguous fast-path actions, and routes everything else to `Brain.generate()`.
+    Logs every turn as `FAST:<rule>`, `LLM:<ms>ms`, or `FALLBACK_NO_MODEL`.
     """
 
     def __init__(
@@ -173,11 +147,6 @@ class IntentRouter:
         self.bus = event_bus or get_event_bus()
         self.logger = logging.getLogger("ev.intent_router")
 
-        base_dir_Attr = getattr(brain, "base_dir", None)
-        self.base_dir: Path = Path(base_dir_Attr) if base_dir_Attr else Path(__file__).resolve().parent.parent
-        self.code_dir: Path = self.base_dir / "data" / "workspace" / "code"
-        self.code_dir.mkdir(parents=True, exist_ok=True)
-
         sec_cfg = config.get("security", {})
         self.confirm_messages: bool = bool(sec_cfg.get("require_confirmation_for_messages", False))
         self.confirm_calls: bool = bool(sec_cfg.get("require_confirmation_for_calls", False))
@@ -187,21 +156,6 @@ class IntentRouter:
 
         self._pending_action: Optional[Callable[[], str]] = None
         self._pending_description: str = ""
-        # Pending contact number prompt: (contact_name, pending_message, action_type="whatsapp"|"call")
-        self._awaiting_contact_number: Optional[Tuple[str, str, str]] = None
-
-        # Short-term session context for pronoun/coreference resolution
-        self._recent_turns: Deque[Dict[str, str]] = deque(maxlen=8)
-        self._entities: Dict[str, str] = {
-            "assistant": "E.V.",
-            "person": "",
-            "person_gender": "",
-            "female_person": "",
-            "male_person": "",
-            "app": "",
-            "file": "",
-            "topic": "",
-        }
 
         self._rules: List[IntentRule] = []
         self._register_builtin_rules()
@@ -228,104 +182,6 @@ class IntentRouter:
         )
         self._rules.sort(key=lambda r: r.priority)
 
-    # =========================================================================
-    # Short-Term Coreference & Entity Tracking
-    # =========================================================================
-    def _remember_person_entity(self, name: str, relationship: str = "") -> None:
-        clean = (name or "").strip()
-        if not clean or clean.lower() in ("e.v.", "ev", "evie", "you", "yourself"):
-            return
-        self._entities["person"] = clean
-        rel_low = (relationship or clean).strip().lower()
-        if rel_low in _FEMALE_RELATIONS:
-            self._entities["person_gender"] = "female"
-            self._entities["female_person"] = clean
-        elif rel_low in _MALE_RELATIONS:
-            self._entities["person_gender"] = "male"
-            self._entities["male_person"] = clean
-
-    def resolve_coreferences(self, text: str) -> str:
-        """
-        Resolve unambiguous pronouns ('she', 'her', 'he', 'him', 'it') using the
-        short-term session entity tracker:
-          - If the user says 'she is not working' / 'why is she...' when talking about
-            the assistant (or no female contact is active), resolve 'she' -> 'E.V.'.
-          - If a contact ('Mom', 'Arin') was just discussed and the user says
-            'call her' / 'send hello to her on WhatsApp' / 'what is her number',
-            substitute that contact's name.
-          - If a code file or app was just created/opened and the user says
-            'open it', substitute the file or app.
-        """
-        if not text:
-            return ""
-        resolved = text.strip()
-        low = resolved.lower()
-
-        female_contact = self._entities.get("female_person") or (
-            self._entities.get("person") if self._entities.get("person_gender") == "female" else ""
-        )
-        male_contact = self._entities.get("male_person") or (
-            self._entities.get("person") if self._entities.get("person_gender") == "male" else ""
-        )
-        any_contact = self._entities.get("person", "")
-
-        # 1. Assistant complaints / status ("she is not working", "she didn't hear me", "why is she slow")
-        if re.search(
-            r"\bshe\s+(?:is\s+not|isn't|doesn't|does\s+not|didn't|won't|can't|cannot|keeps|always|never)\s+(?:work(?:ing)?|listen(?:ing)?|hear(?:ing)?|respond(?:ing)?|answer(?:ing)?|speak(?:ing)?|talk(?:ing)?)\b",
-            low,
-        ):
-            resolved = re.sub(r"\bshe\b", "E.V.", resolved, flags=re.IGNORECASE)
-            return resolved
-
-        # 2. Action commands with 'her' / 'she' ("call her", "send hello to her on whatsapp", "her phone number")
-        if female_contact:
-            resolved = re.sub(
-                r"\b(?P<prep>to|for|call|dial|phone|message|text|whatsapp)\s+her\b",
-                lambda m: f"{m.group('prep')} {female_contact}",
-                resolved,
-                flags=re.IGNORECASE,
-            )
-            resolved = re.sub(
-                r"\bher\s+(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|instagram|birthday)\b",
-                lambda m: f"{female_contact}'s {m.group('attr')}",
-                resolved,
-                flags=re.IGNORECASE,
-            )
-        elif not female_contact and re.search(r"\b(?:she|her)\b", low):
-            # Default 'she' to E.V. when no female person was mentioned in the session
-            if re.search(r"\b(?:why\s+is\s+she|what\s+is\s+she|she\s+is)\b", low):
-                resolved = re.sub(r"\bshe\b", "E.V.", resolved, flags=re.IGNORECASE)
-
-        # 3. Action commands with 'him' / 'he'
-        target_male = male_contact or any_contact
-        if target_male:
-            resolved = re.sub(
-                r"\b(?P<prep>to|for|call|dial|phone|message|text|whatsapp)\s+him\b",
-                lambda m: f"{m.group('prep')} {target_male}",
-                resolved,
-                flags=re.IGNORECASE,
-            )
-            resolved = re.sub(
-                r"\bhis\s+(?P<attr>phone\s+number|mobile\s+number|whatsapp\s+number|number|instagram|birthday)\b",
-                lambda m: f"{target_male}'s {m.group('attr')}",
-                resolved,
-                flags=re.IGNORECASE,
-            )
-
-        # 4. "open it" / "run it" referring to the last generated code file or app
-        last_file = self._entities.get("file", "")
-        last_app = self._entities.get("app", "")
-        if re.match(r"^(?:please\s+)?(?:open|launch|run|show)\s+(?:it|that)(?:\s+in\s+(?P<where>browser|vs\s*code|code))?$", low):
-            if last_file:
-                return f"open generated file {last_file}"
-            if last_app:
-                return f"open {last_app}"
-
-        return resolved
-
-    # =========================================================================
-    # Main Routing Entrypoint
-    # =========================================================================
     def route(
         self,
         text: str,
@@ -335,48 +191,11 @@ class IntentRouter:
     ) -> IntentMatch:
         """
         Route a user utterance through unambiguous fast-path rules first,
-        then silent factual search (if applicable), then `Brain.generate()`.
+        then fall through to `Brain.generate()`.
         """
         t0 = time.perf_counter()
         ctx = dict(context) if context else {}
-        ctx["raw_input"] = text
         conf = float(confidence if confidence is not None else ctx.get("confidence", 1.0))
-
-        normalized_input = VoskSTT.normalize_indian_english_transcript((text or "").strip())
-        cleaned = self._strip_wake_prefix(normalized_input)
-        cleaned_digits = convert_spoken_numbers(cleaned)
-
-        # Priority 0: "stop listening" / "stopped listening" / "stand by" ALWAYS works
-        # even if STT confidence was low
-        if re.search(
-            r"\b(?:stop(?:ped)?\s+listening|go\s+to\s+(?:stand\s*by|sleep)|stand\s*by|pause\s+listening|sleep\s+mode)\b",
-            cleaned_digits,
-            re.IGNORECASE,
-        ):
-            if self.tts is not None:
-                self.tts.interrupt()
-            if self.brain is not None and hasattr(self.brain, "cancel"):
-                self.brain.cancel()
-            self.bus.publish(
-                Topics.SETTINGS_CHANGED,
-                {"key": "continuousListening", "value": False},
-                source="intent_router",
-            )
-            self.bus.publish(
-                Topics.ORB_STATE,
-                {"state": "idle", "progress": 0.0},
-                source="intent_router",
-            )
-            latency = round((time.perf_counter() - t0) * 1000.0, 2)
-            reply = "Standing by, sir."
-            self.logger.info("FAST:continuous_listening_mode | %.2fms | input='%s'", latency, mask_pii(cleaned))
-            return IntentMatch(
-                intent_name="continuous_listening_mode",
-                raw_text=cleaned,
-                response_text=reply,
-                handled_by_fast_path=True,
-                latency_ms=latency,
-            )
 
         if confidence is not None and conf < self.min_confidence:
             self.logger.info(
@@ -393,8 +212,9 @@ class IntentRouter:
                 latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             )
 
-        # Apply short-term pronoun/coreference resolution
-        cleaned_digits = self.resolve_coreferences(cleaned_digits)
+        normalized_input = VoskSTT.normalize_indian_english_transcript((text or "").strip())
+        cleaned = self._strip_wake_prefix(normalized_input)
+        cleaned_digits = convert_spoken_numbers(cleaned)
 
         low_clean = re.sub(r"[^a-z0-9\s]", " ", cleaned_digits.lower())
         low_clean = re.sub(r"\s+", " ", low_clean).strip()
@@ -407,30 +227,6 @@ class IntentRouter:
                 handled_by_fast_path=True,
                 latency_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             )
-
-        # Check if we were waiting for a missing contact phone number from the previous turn
-        if self._awaiting_contact_number is not None:
-            digits_only = re.sub(r"[^\d+]", "", normalize_phone_digits(cleaned_digits))
-            if len(re.sub(r"\D", "", digits_only)) >= 7:
-                c_name, pending_msg, act_type = self._awaiting_contact_number
-                self._awaiting_contact_number = None
-                if self.rag is not None:
-                    self.rag.add_or_update_contact(c_name, phone=digits_only, whatsapp=digits_only)
-                if act_type == "whatsapp" and pending_msg:
-                    reply = self._execute_multistep_whatsapp_send(c_name, digits_only, pending_msg)
-                elif act_type == "call":
-                    reply = self._execute_multistep_call(c_name, digits_only)
-                else:
-                    reply = f"Saved {c_name}'s number as {digits_only}, sir."
-                latency = round((time.perf_counter() - t0) * 1000.0, 2)
-                self._log_to_memory(cleaned, reply, "saved_pending_contact_number")
-                return IntentMatch(
-                    intent_name="saved_pending_contact_number",
-                    raw_text=cleaned,
-                    response_text=reply,
-                    handled_by_fast_path=True,
-                    latency_ms=latency,
-                )
 
         # Confirmation gate check
         if self._pending_action is not None:
@@ -452,7 +248,7 @@ class IntentRouter:
             if low_clean in ("no", "nope", "cancel", "stop", "don t", "dont", "abort", "never mind"):
                 self._pending_action = None
                 self._pending_description = ""
-                reply = "Cancelled, sir."
+                reply = "Cancelled."
                 latency = round((time.perf_counter() - t0) * 1000.0, 2)
                 self.logger.info("FAST:cancelled_action | %.2fms | input='%s'", latency, mask_pii(cleaned))
                 self._log_to_memory(cleaned, reply, "cancelled_action")
@@ -479,6 +275,7 @@ class IntentRouter:
 
         # Evaluate deterministic fast-path rules
         for rule in self._rules:
+            # Guard: never allow conversational meta-statements about volume/time to trigger volume_control
             if rule.name == "volume_control" and re.search(
                 r"\b(?:each\s+time|every\s+time|from\s+yourself|by\s+yourself|you\s+increase(?:d)?|why\s+did\s+you|when\s+you)\b",
                 low_clean,
@@ -499,7 +296,7 @@ class IntentRouter:
                         return IntentMatch(
                             intent_name="low_confidence_guard",
                             raw_text=cleaned,
-                            response_text="Please repeat that command, sir.",
+                            response_text="Please repeat that command.",
                             handled_by_fast_path=True,
                             latency_ms=latency,
                         )
@@ -513,7 +310,7 @@ class IntentRouter:
                         reply = rule.handler(match, cleaned_digits, ctx)
                     except Exception as exc:
                         self.logger.error("Error in intent handler '%s': %s", rule.name, exc, exc_info=True)
-                        reply = f"Failed to execute {rule.name.replace('_', ' ')}, sir."
+                        reply = f"Failed to execute {rule.name.replace('_', ' ')}."
 
                     latency = round((time.perf_counter() - t0) * 1000.0, 2)
                     self.logger.info(
@@ -532,32 +329,8 @@ class IntentRouter:
                         latency_ms=latency,
                     )
 
-        # Silent background web search for factual world-knowledge questions if not in local memory
-        if self.web_search is not None and _FACTUAL_QUESTION_PATTERN.search(cleaned_digits):
-            local_fact = self.rag.find_direct_fact_answer(cleaned_digits) if self.rag is not None else None
-            if not local_fact:
-                web_answer = self.web_search.answer_factual_question(cleaned_digits)
-                if web_answer:
-                    latency = round((time.perf_counter() - t0) * 1000.0, 2)
-                    self.logger.info(
-                        "FAST:background_web_search | %.2fms | input='%s'",
-                        latency,
-                        mask_pii(cleaned),
-                    )
-                    self._log_to_memory(cleaned, web_answer, "background_web_search")
-                    return IntentMatch(
-                        intent_name="background_web_search",
-                        raw_text=cleaned,
-                        response_text=web_answer,
-                        handled_by_fast_path=True,
-                        latency_ms=latency,
-                    )
-
-        # Fall through to Brain.generate() with RAG + short-term session context
-        rag_ctx = self.rag.build_context_for_prompt(cleaned_digits) if self.rag is not None else ""
-        session_ctx = self._build_short_term_context()
-        combined_ctx = "\n".join(part for part in (rag_ctx, session_ctx) if part).strip() or None
-
+        # Fall through to Brain.generate()
+        rag_ctx = self.rag.build_context_for_prompt(cleaned) if self.rag is not None else None
         model_loaded = bool(
             self.brain is not None
             and (
@@ -570,14 +343,14 @@ class IntentRouter:
         if self.brain is not None:
             try:
                 reply = self.brain.generate(
-                    cleaned_digits,
-                    extra_context=combined_ctx,
+                    cleaned,
+                    extra_context=rag_ctx,
                     on_first_sentence=on_first_sentence,
                 )
             except TypeError:
-                reply = self.brain.generate(cleaned_digits, extra_context=combined_ctx)
+                reply = self.brain.generate(cleaned, extra_context=rag_ctx)
         else:
-            reply = "I can't think yet, sir. The local engine failed to start."
+            reply = "I can't think yet. The local engine failed to start."
 
         latency = round((time.perf_counter() - t0) * 1000.0, 2)
         if model_loaded:
@@ -594,21 +367,7 @@ class IntentRouter:
             latency_ms=latency,
         )
 
-    def _build_short_term_context(self) -> str:
-        lines: List[str] = []
-        if self._entities.get("person"):
-            lines.append(f"- Last mentioned contact/person in this session: {self._entities['person']}")
-        if self._entities.get("file"):
-            lines.append(f"- Last generated code file in this session: {self._entities['file']}")
-        if self._entities.get("app"):
-            lines.append(f"- Last opened application: {self._entities['app']}")
-        return "\n".join(lines)
-
     def _log_to_memory(self, user_text: str, assistant_text: str, intent_name: str) -> None:
-        if user_text and assistant_text:
-            self._recent_turns.append(
-                {"user": user_text, "assistant": assistant_text, "intent": intent_name}
-            )
         if self.rag is not None and intent_name not in ("wake_acknowledge", "low_confidence_guard", "empty"):
             try:
                 self.rag.record_interaction(user_text, assistant_text, intent_name=intent_name)
@@ -636,7 +395,6 @@ class IntentRouter:
         if m is not None:
             ws_name = (m.group("ws") or "coding").strip().lower()
             contact = (m.group("contact") or "Mom").strip().title()
-            self._remember_person_entity(contact)
             seconds = int(
                 m.group("seconds")
                 or self.config.get("gui", {}).get("default_countdown_seconds", 30)
@@ -681,7 +439,7 @@ class IntentRouter:
             return IntentMatch(
                 intent_name="compound_workspace_and_timed_call",
                 raw_text=cleaned,
-                response_text=f"Launching your {ws_name} workspace. I'll call {contact} in {seconds} seconds, sir.",
+                response_text=f"Launching your {ws_name} workspace. I'll call {contact} in {seconds} seconds.",
                 slots={"workspace": ws_name, "contact": contact, "seconds": seconds},
                 handled_by_fast_path=True,
             )
@@ -713,30 +471,30 @@ class IntentRouter:
             description="Immediately stop E.V. from speaking",
         )
 
-        # 6: Continuous Listening & Standby Mode ("stop listening", "stopped listening", "stand by")
+        # 6: Continuous Listening & Standby Mode ("stop listening", "go to sleep", "stand by")
         self.register(
             name="continuous_listening_mode",
             priority=6,
             patterns=[
-                r"\b(?P<sleep>stop(?:ped)?\s+listening|go\s+to\s+(?:stand\s*by|sleep)|stand\s*by|pause\s+listening|sleep\s+mode)\b",
+                r"^(?:please\s+)?(?P<sleep>stop\s+listening|go\s+to\s+sleep|stand\s*by|pause\s+listening|sleep\s+mode)$",
                 r"\b(?:continuously\s+listen(?:ing)?|continuous\s+listening|always\s+listen(?:ing)?|keep\s+listening|start\s+listening)\b",
             ],
             handler=self._handle_continuous_listening,
             description="Enable or exit continuous listening mode",
         )
 
-        # 7: Strict Identity & 'Who am I' (ONLY when explicitly asking identity/creator/hearing)
+        # 7: Identity & 'Who am I' anywhere in the sentence
         self.register(
             name="assistant_identity",
             priority=7,
             patterns=[
-                r"^(?:please\s+)?(?P<who_am_i>who\s+am\s+i|who\s+i\s+am|what(?:'s|\s+is)\s+my\s+name)\??$",
-                r"^(?:please\s+)?(?P<creator>who\s+(?:created|made|built|developed|programmed)\s+you|who\s+is\s+your\s+creator)\??$",
-                r"^(?:please\s+)?(?:who\s+are\s+you|what\s+are\s+you|what(?:'s|\s+is)\s+your\s+name|tell\s+me\s+about\s+yourself|introduce\s+yourself|give\s+me\s+(?:a\s+)?(?:basic\s+)?introduction(?:\s+of\s+yours)?)\??$",
+                r"\b(?P<who_am_i>who\s+am\s+i|who\s+i\s+am|what(?:'s|\s+is)\s+my\s+name)\b",
+                r"\b(?P<creator>who\s+(?:created|made|built|developed|programmed)\s+you|who\s+is\s+your\s+creator)\b",
+                r"\b(?:who\s+(?:the\s+\w+\s+)?are\s+you|what\s+are\s+you|what(?:'s|\s+is)\s+your\s+name|tell\s+me\s+about\s+yourself|introduce\s+yourself|introduction\s+of\s+yours|basic\s+introduction)\b",
                 r"^(?P<checkin>can\s+you\s+hear\s+me|are\s+you\s+able\s+to\s+hear\s+me|do\s+you\s+hear\s+me|am\s+i\s+audible)\??$",
             ],
             handler=self._handle_assistant_identity,
-            description="Strict E.V. identity, creator, and 'Who am I' handler",
+            description="Unanchored E.V. identity, creator, and 'Who am I' handler",
         )
 
         # 8: Timer Cancel / Run Now
@@ -761,19 +519,6 @@ class IntentRouter:
             handler=self._handle_workspace_undo,
             description="Reverse the last launched workspace and close spawned items",
             dangerous=True,
-        )
-
-        # 12: Coding Capability (HTML/CSS/JS/React/Python generation -> data/workspace/code/)
-        self.register(
-            name="coding_generation",
-            priority=12,
-            patterns=[
-                r"^(?:please\s+)?(?:create|make|build|write|generate|code)\s+(?:a\s+|an\s+)?(?P<lang>react|html|css|javascript|js|python|web)?\s*(?P<kind>page|webpage|website|app|application|component|script|program|code|file)\s+(?:that|for|to|which|with|about)\s+(?P<task>.+)$",
-                r"^(?:please\s+)?(?:write|generate)\s+(?P<lang>react|html|css|javascript|js|python)\s+code\s+(?:for|to|that)\s+(?P<task>.+)$",
-                r"^open\s+generated\s+file\s+(?P<open_file>.+)$",
-            ],
-            handler=self._handle_coding_generation,
-            description="Generate HTML/CSS/JS/React/Python code and save under data/workspace/code/",
         )
 
         # 14: Selective Workspace Launch
@@ -867,7 +612,7 @@ class IntentRouter:
             description="Query or manage contacts in SQLite",
         )
 
-        # 20: Timed / Delayed Commands
+        # 20: Timed / Delayed Commands ("set a/the timer for/of/off ten seconds", "in 10 seconds dim desk lights")
         self.register(
             name="timed_command",
             priority=20,
@@ -880,24 +625,24 @@ class IntentRouter:
             description="Schedule a delayed command or countdown timer on the right HUD panel",
         )
 
-        # 22: Multi-Step WhatsApp Messaging
+        # 22: WhatsApp Messaging
         self.register(
             name="whatsapp_action",
             priority=22,
             patterns=[
                 r"^what\s+was\s+the\s+last\s+(?:whatsapp\s+)?message\s+i\s+sent\s+to\s+(?P<last_person>[a-zA-Z0-9\s]+?)\??$",
-                r"(?:(?:open|launch)\s+whatsapp\s+(?:and\s+)?)?send\s+(?:a\s+|an\s+|our\s+)?(?P<msg>[a-z0-9\s]+?)\s+message\s+(?:to|too)\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)(?:\s+on\s+whatsapp)?$",
-                r"(?:open|launch)\s+whatsapp\s+(?:and\s+)?(?:send|message|text)\s+(?:a\s+)?(?P<msg>[a-z0-9\s]+?)\s+(?:to|too)\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)$",
+                r"(?:(?:open|launch)\s+whatsapp\s+(?:and\s+)?)?send\s+(?:a\s+|an\s+)?(?P<msg>[a-z0-9\s]+?)\s+message\s+to\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)(?:\s+on\s+whatsapp)?$",
+                r"(?:open|launch)\s+whatsapp\s+(?:and\s+)?(?:send|message|text)\s+(?:a\s+)?(?P<msg>[a-z0-9\s]+?)\s+to\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)$",
                 r"\bsend\s+(?:a\s+)?whatsapp\s+voice\s+note\s+to\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)\s+(?:saying|that|:)\s+(?P<msg>.+)$",
                 r"\bsend\s+(?:a\s+)?(?:whatsapp\s+)?(?:message\s+)?to\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)\s+(?:on\s+whatsapp\s+)?(?:saying|that|:)\s+(?P<msg>.+)$",
-                r"\bsend\s+(?P<msg>hello|hi|hey|[a-z0-9\s]+?)\s+to\s+(?:my\s+)?(?P<contact>mom|mummy|mommy|mammi|mother|dad|papa|father|brother|sister|[a-z0-9]+)(?:\s+on\s+whatsapp)?$",
+                r"\bsend\s+(?P<msg>hello|hi|hey|[a-z0-9\s]+?)\s+to\s+(?:my\s+)?(?P<contact>mom|mummy|mommy|mother|dad|papa|father|brother|sister|[a-z0-9]+)(?:\s+on\s+whatsapp)?$",
                 r"\bsend\s+(?!a\s|an\s|the\s)(?P<contact>[a-z0-9]+)\s+a\s+(?P<msg>.+?)\s+message(?:\s+on\s+whatsapp)?$",
                 r"\b(?:message|text|whatsapp)\s+(?:my\s+)?(?P<contact>[a-z0-9\s]+?)\s+on\s+whatsapp(?:\s+(?:saying|that|:)\s+(?P<msg>.+))?$",
                 r"^(?:open|launch)\s+(?P<open_only>whatsapp)$",
                 r"\b(?P<read>read|check)\s+(?:my\s+)?whatsapp(?:\s+messages)?\b",
             ],
             handler=self._handle_whatsapp,
-            description="Multi-step WhatsApp messaging using SQLite contacts",
+            description="WhatsApp messaging using SQLite contacts",
         )
 
         # 24: Phone ADB Specific Controls
@@ -916,15 +661,15 @@ class IntentRouter:
             dangerous=True,
         )
 
-        # 25: Multi-Step Phone / WhatsApp Call Intent ("Call Mom", "Call Mom on WhatsApp")
+        # 25: Phone Call Intent ("Call Mom", "Call John")
         self.register(
             name="phone_call",
             priority=25,
             patterns=[
-                r"^(?:please\s+)?(?:make\s+a\s+call\s+to|prepare\s+a\s+call\s+to|call|dial|phone)\s+(?!me\b)(?:my\s+)?(?P<contact>[a-z0-9\s]+?)(?:\s+on\s+(?P<platform>whatsapp))?$",
+                r"^(?:please\s+)?(?:make\s+a\s+call\s+to|prepare\s+a\s+call\s+to|call|dial|phone)\s+(?!me\b)(?:my\s+)?(?P<contact>[a-z0-9\s]+)$",
             ],
             handler=self._handle_phone_call,
-            description="Initiate a multi-step phone or WhatsApp call using SQLite contacts",
+            description="Initiate a phone call using SQLite contacts",
             dangerous=True,
         )
 
@@ -942,6 +687,9 @@ class IntentRouter:
         )
 
         # 30: System Volume & Mute Controls
+        #     - "increase/set the volume to/as 100 percent" -> sets 100
+        #     - "increase/decrease the volume by 10 percent" -> steps by +/-10
+        #     - "increase the volume" / "turn up the volume" -> steps by +10
         self.register(
             name="volume_control",
             priority=30,
@@ -983,7 +731,7 @@ class IntentRouter:
             description="Report live CPU, RAM, Battery, and zero-VRAM status",
         )
 
-        # 45: Live Background Web Search
+        # 45: Live Web Search
         self.register(
             name="web_search",
             priority=45,
@@ -991,7 +739,7 @@ class IntentRouter:
                 r"\b(?:search\s+(?:the\s+web\s+)?for|look\s+up|google|duckduckgo|find\s+info\s+on)\s+(?P<query>.+)$",
             ],
             handler=self._handle_web_search,
-            description="Search the live web silently in the background using duckduckgo-search",
+            description="Search the live web using duckduckgo-search",
         )
 
         # 50: Close / Terminate Application
@@ -1017,7 +765,7 @@ class IntentRouter:
             description="Open a local application, folder, or URL",
         )
 
-        # 60: Actual Time & Date Questions ONLY
+        # 60: Actual Time & Date Questions ONLY (never bare 'time')
         self.register(
             name="time_date",
             priority=60,
@@ -1031,138 +779,38 @@ class IntentRouter:
     # =========================================================================
     # Handler Implementations
     # =========================================================================
-    def _publish_step_progress(self, task_name: str, step: int, total: int, status: str = "running") -> None:
-        pct = min(1.0, max(0.0, float(step) / float(max(1, total))))
-        self.bus.publish(
-            Topics.ORB_STATE,
-            {"state": "acting" if status == "running" else "idle", "progress": pct},
-            source="intent_router",
-        )
-        self.bus.publish(
-            Topics.WORKSPACE_PROGRESS,
-            {"name": task_name, "status": status, "completed": step, "total": total},
-            source="intent_router",
-        )
-
     def _handle_continue_speech(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         if self.tts is not None:
             resumed, _ = self.tts.resume(block=False)
             if resumed:
                 return ""
-        return "Nothing pending to continue, sir."
+        return "Nothing pending to continue."
 
     def _handle_interrupt_speech(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         if self.tts is not None:
             self.tts.interrupt()
-        if self.brain is not None and hasattr(self.brain, "cancel"):
-            self.brain.cancel()
         self.bus.publish(Topics.ORB_STATE, {"state": "listening", "progress": 0.0}, source="intent_router")
         return ""
 
     def _handle_continuous_listening(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
         is_sleep = bool(gd.get("sleep")) or any(
-            w in raw.lower() for w in ("disable", "turn off", "stop", "stopped", "sleep", "stand by", "standby", "pause")
+            w in raw.lower() for w in ("disable", "turn off", "stop", "sleep", "stand by", "standby", "pause")
         )
         enable = not is_sleep
-        if is_sleep:
-            if self.tts is not None:
-                self.tts.interrupt()
-            if self.brain is not None and hasattr(self.brain, "cancel"):
-                self.brain.cancel()
         self.bus.publish(
             Topics.SETTINGS_CHANGED,
             {"key": "continuousListening", "value": enable},
             source="intent_router",
         )
         if enable:
-            return "Continuous listening active, sir."
-        return "Standing by, sir."
-
-    # =========================================================================
-    # Coding Capability Handler (`data/workspace/code/`)
-    # =========================================================================
-    def _handle_coding_generation(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
-        gd = match.groupdict()
-        if gd.get("open_file"):
-            fpath = Path(gd["open_file"].strip())
-            if fpath.exists():
-                self._open_generated_code_file(fpath, open_in_vscode=False)
-                return f"Opened {fpath.name}, sir."
-            return "I couldn't find that generated file, sir."
-
-        raw_lang = (gd.get("lang") or "").strip().lower()
-        kind = (gd.get("kind") or "page").strip().lower()
-        task_full = (gd.get("task") or "interactive page").strip()
-
-        # Check if user asked to open it after generating
-        wants_open = bool(
-            re.search(r"\band\s+(?:open|launch|run|show)\s+it\b|\bopen\s+it\s+in\s+(?:browser|vs\s*code|code)\b", task_full, re.I)
-        )
-        wants_vscode = bool(re.search(r"\b(?:vs\s*code|visual\s+studio\s+code)\b", task_full, re.I))
-        clean_task = re.sub(
-            r"\s*\band\s+(?:open|launch|run|show)\s+it(?:\s+in\s+(?:browser|vs\s*code|code))?$",
-            "",
-            task_full,
-            flags=re.I,
-        ).strip()
-
-        if raw_lang in ("python", "py") or kind in ("script", "program") and raw_lang not in ("js", "javascript"):
-            lang = "python"
-            ext = ".py"
-        elif raw_lang == "react":
-            lang = "react"
-            ext = ".html"  # Self-contained React + Babel HTML so it runs immediately in browser
-        elif raw_lang in ("css",):
-            lang = "css"
-            ext = ".css"
-        elif raw_lang in ("javascript", "js"):
-            lang = "javascript"
-            ext = ".js"
-        else:
-            lang = "html"
-            ext = ".html"
-
-        slug_words = re.findall(r"[a-z0-9]+", clean_task.lower())
-        stop = {"a", "an", "the", "that", "for", "to", "with", "and", "in", "on", "of"}
-        slug_parts = [w for w in slug_words if w not in stop][:4] or [lang, kind]
-        filename = "_".join(slug_parts) + ext
-        out_path = self.code_dir / filename
-
-        self._publish_step_progress(f"Code: {filename}", 1, 3, "running")
-        if self.brain is not None and hasattr(self.brain, "generate_code"):
-            code_content = self.brain.generate_code(clean_task, language=lang)
-        else:
-            code_content = f"<!-- Generated for: {clean_task} -->\n<h1>{clean_task}</h1>\n"
-
-        self._publish_step_progress(f"Code: {filename}", 2, 3, "running")
-        out_path.write_text(code_content, encoding="utf-8")
-        self._entities["file"] = str(out_path)
-        self._entities["topic"] = clean_task
-        self._publish_step_progress(f"Code: {filename}", 3, 3, "completed")
-
-        if wants_open or wants_vscode:
-            self._open_generated_code_file(out_path, open_in_vscode=wants_vscode)
-            return f"I've generated {filename}, saved it to your code workspace, and opened it for you, sir."
-
-        return f"I've generated {filename} and saved it to your code workspace, sir."
-
-    def _open_generated_code_file(self, file_path: Path, open_in_vscode: bool = False) -> None:
-        try:
-            if open_in_vscode:
-                subprocess.Popen(["code", str(file_path)], shell=(os.name == "nt"))
-                return
-            if file_path.suffix.lower() in (".html", ".htm"):
-                webbrowser.open(file_path.resolve().as_uri(), new=2)
-            elif hasattr(os, "startfile"):
-                os.startfile(str(file_path))  # type: ignore[attr-defined]
-        except Exception as exc:
-            self.logger.debug("Could not auto-open generated code file %s: %s", file_path, exc)
+            return "Continuous listening active."
+        return "Standing by."
 
     def _handle_self_learning(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
         if self.rag is None:
-            return "Memory module unavailable, sir."
+            return "Memory module unavailable."
 
         if gd.get("query_learned"):
             return self.rag.summarize_learned_about_user()
@@ -1178,29 +826,25 @@ class IntentRouter:
         field_q = (match.groupdict().get("field") or "").strip()
         if self.rag is not None:
             return self.rag.query_my_profile(field_q)
-        return f"Your {field_q} is not saved yet, sir."
+        return f"Your {field_q} is not saved yet."
 
     def _handle_instagram_action(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
-        self._entities["app"] = "instagram"
         if gd.get("app_only"):
             if self.phone_adb is not None and self.phone_adb.is_connected:
                 _, msg = self.phone_adb.open_app("instagram")
                 return msg
             if self.system_ctrl is not None:
                 self.system_ctrl.open_url("https://www.instagram.com/")
-            return "Opened Instagram, sir."
+            return "Opened Instagram."
 
         person = (gd.get("person") or "").strip()
         if person:
-            self._remember_person_entity(person)
             handle = person.lstrip("@")
             if self.rag is not None:
                 contact, err = self.rag.resolve_contact_or_disambiguate(person)
-                if contact is not None:
-                    self._remember_person_entity(contact.name, contact.relationship)
-                    if contact.instagram_username:
-                        handle = contact.instagram_username.lstrip("@")
+                if contact is not None and contact.instagram_username:
+                    handle = contact.instagram_username.lstrip("@")
                 elif err and "multiple contacts" in err.lower():
                     return err
             if self.phone_adb is not None:
@@ -1208,7 +852,7 @@ class IntentRouter:
                 return msg
             if self.system_ctrl is not None:
                 self.system_ctrl.open_url(f"https://www.instagram.com/{handle}/")
-            return f"Opened @{handle} on Instagram, sir."
+            return f"Opened @{handle} on Instagram."
 
         my_handle = ""
         if self.rag is not None:
@@ -1219,42 +863,37 @@ class IntentRouter:
         if self.system_ctrl is not None:
             url = f"https://www.instagram.com/{my_handle}/" if my_handle else "https://www.instagram.com/"
             self.system_ctrl.open_url(url)
-        return f"Opened your Instagram profile (@{my_handle}), sir." if my_handle else "Opened Instagram, sir."
+        return f"Opened your Instagram profile (@{my_handle})." if my_handle else "Opened Instagram."
 
     def _handle_contact_management(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
 
         if gd.get("search_person"):
             sp = gd["search_person"].strip()
-            self._remember_person_entity(sp)
             if self.phone_adb is not None:
                 self.phone_adb.search_contacts_app(sp)
             if self.rag is not None:
                 desc = self.rag.describe_person(sp)
                 return f"Opened your contacts for {sp}. {desc}"
-            return f"Opened your contacts for {sp}, sir."
+            return f"Opened your contacts for {sp}."
 
         if gd.get("new_name") and self.rag is not None:
             name = gd["new_name"].strip().title()
             rel = (gd.get("new_rel") or "").strip().lower()
-            num = normalize_phone_digits(gd.get("new_num") or "")
-            self._remember_person_entity(name, rel)
+            num = (gd.get("new_num") or "").strip()
             self.rag.sqlite.upsert_contact(name=name, relationship=rel, mobile_number=num, whatsapp_number=num)
-            return f"Saved {name} to your contacts, sir."
+            return f"Saved {name} to your contacts."
 
         if gd.get("person") and gd.get("attr") and self.rag is not None:
-            person_q = gd["person"].strip()
-            self._remember_person_entity(person_q)
-            return self.rag.query_contact_attribute(person_q, gd["attr"].strip())
+            return self.rag.query_contact_attribute(gd["person"].strip(), gd["attr"].strip())
 
         if gd.get("who_person") and self.rag is not None:
             wp = gd["who_person"].strip()
             if wp.lower() in ("you", "ev", "e.v.", "evie", "your creator"):
-                return self.brain.IDENTITY_RESPONSE if self.brain else "I am E.V., sir."
-            self._remember_person_entity(wp)
+                return self.brain.IDENTITY_RESPONSE if self.brain else "I am E.V."
             return self.rag.describe_person(wp)
 
-        return "Contact not found, sir."
+        return "Contact not found."
 
     def _handle_assistant_identity(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
@@ -1269,20 +908,23 @@ class IntentRouter:
             return "Yes, I can hear you clearly."
         if self.brain is not None and hasattr(self.brain, "IDENTITY_RESPONSE"):
             return str(self.brain.IDENTITY_RESPONSE)
-        return "I am E.V., Enhanced Virtual Assistant, created by Bruprog. How can I help you, sir?"
+        return (
+            "I am E.V., Enhanced Virtual Assistant, created by Bruprog. "
+            "I manage your workspaces, desktop controls, timers, calls, and messages offline."
+        )
 
     def _handle_timer_control(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         action = (match.groupdict().get("action") or "cancel").lower()
         if self.scheduler is not None:
             if action in ("run", "execute"):
                 self.scheduler.run_now()
-                return "Executing scheduled command now, sir."
+                return "Executing scheduled command now."
             self.scheduler.cancel(speak_feedback=False)
-        return "Timer cancelled, sir."
+        return "Timer cancelled."
 
     def _handle_workspace_selective_launch(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         if self.workspace_orch is None:
-            return "Workspace orchestrator is not available, sir."
+            return "Workspace orchestrator is not available."
         ws_name = (match.groupdict().get("ws") or "coding").strip().lower()
         raw_filters = (match.groupdict().get("filters") or "").strip()
         items = [f.strip() for f in re.split(r",|\band\b|\bor\b", raw_filters) if f.strip()]
@@ -1299,7 +941,7 @@ class IntentRouter:
             {"name": f"{ws_name.title()} workspace", "status": "running", "completed": 0, "total": 10},
             source="intent_router",
         )
-        return f"Launching {ws_name} workspace, sir."
+        return f"Launching {ws_name} workspace."
 
     def _handle_workspace_undo(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         if self.workspace_orch is not None:
@@ -1310,7 +952,7 @@ class IntentRouter:
             {"name": "Coding workspace", "status": "undoing", "completed": 10, "total": 10},
             source="intent_router",
         )
-        return "Reversing last workspace, sir."
+        return "Reversing last workspace."
 
     def _handle_timed_command(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
@@ -1322,8 +964,6 @@ class IntentRouter:
         call_m = re.search(r"(?:prepare\s+a\s+call\s+to|call)\s+(?P<c>[a-z0-9\s]+)", task, re.IGNORECASE)
         is_call = call_m is not None
         contact = call_m.group("c").strip().title() if call_m else "Mom"
-        if is_call:
-            self._remember_person_entity(contact)
 
         label = f"Call {contact}" if is_call else (task[:1].upper() + task[1:])
         detail = "Phone bridge · Mobile · E.V. voice routed" if is_call else "Countdown timer · HUD"
@@ -1353,98 +993,60 @@ class IntentRouter:
                 },
                 source="intent_router",
             )
-        return f"Timer set for {seconds} seconds, sir." if not is_call else f"Calling {contact} in {seconds} seconds, sir."
+        return f"Timer set for {seconds} seconds." if not is_call else f"Calling {contact} in {seconds} seconds."
 
-    # =========================================================================
-    # Multi-Step Task Planner for WhatsApp & Calls
-    # =========================================================================
-    def _open_whatsapp_visibly_on_pc(self, phone_number: str = "", message: str = "", auto_send_enter: bool = False) -> None:
+    def _open_whatsapp_visibly_on_pc(self, phone_number: str = "", message: str = "") -> None:
         digits = re.sub(r"[^\d]", "", phone_number or "")
         encoded_msg = urllib.parse.quote(message) if message else ""
 
-        launched_uri = False
-        if digits or encoded_msg:
-            uri = f"whatsapp://send?phone={digits}&text={encoded_msg}" if digits else f"whatsapp://send?text={encoded_msg}"
-            if hasattr(os, "startfile"):
-                try:
-                    os.startfile(uri)  # type: ignore[attr-defined]
-                    launched_uri = True
-                except Exception:
-                    pass
-
-        if not launched_uri and self.system_ctrl is not None:
+        if self.system_ctrl is not None:
             try:
+                if digits or encoded_msg:
+                    uri = f"whatsapp://send?phone={digits}&text={encoded_msg}" if digits else f"whatsapp://send?text={encoded_msg}"
+                    if hasattr(os, "startfile"):
+                        try:
+                            os.startfile(uri)  # type: ignore[attr-defined]
+                            return
+                        except Exception:
+                            pass
                 ok, _ = self.system_ctrl.open_application("whatsapp")
-                if not ok and (digits or encoded_msg):
+                if ok:
+                    return
+                if digits or encoded_msg:
                     web_url = (
                         f"https://web.whatsapp.com/send?phone={digits}&text={encoded_msg}"
                         if digits
                         else "https://web.whatsapp.com/"
                     )
                     self.system_ctrl.open_url(web_url)
+                    return
+            except Exception:
+                pass
+        elif hasattr(os, "startfile"):
+            try:
+                if digits or encoded_msg:
+                    uri = f"whatsapp://send?phone={digits}&text={encoded_msg}" if digits else f"whatsapp://send?text={encoded_msg}"
+                    os.startfile(uri)  # type: ignore[attr-defined]
+                else:
+                    webbrowser.open("https://web.whatsapp.com/")
             except Exception:
                 pass
 
-    def _execute_multistep_whatsapp_send(
-        self,
-        resolved_name: str,
-        resolved_number: str,
-        msg: str,
-        is_vn: bool = False,
-    ) -> str:
-        """
-        Execute the 5-step WhatsApp message workflow with live HUD progress updates:
-          Step 1: Contact resolved
-          Step 2: Open WhatsApp (Desktop URI or Android ADB)
-          Step 3: Select contact chat
-          Step 4: Type message
-          Step 5: Send & record in SQLite message_history
-        """
-        task_label = f"WhatsApp → {resolved_name}"
-        self._publish_step_progress(task_label, 1, 5, "running")
-
-        if self.rag is not None:
-            self.rag.record_sent_message(resolved_name, platform="whatsapp", message_text=msg)
-
-        # Step 2 & 3: Open WhatsApp and select contact chat
-        self._publish_step_progress(task_label, 2, 5, "running")
-        if self.phone_adb is not None and self.phone_adb.is_connected and resolved_number and not is_vn:
-            self._publish_step_progress(task_label, 3, 5, "running")
-            self.phone_adb.open_whatsapp_chat(resolved_number, message=msg)
-        else:
-            self._publish_step_progress(task_label, 3, 5, "running")
-            self._open_whatsapp_visibly_on_pc(phone_number=resolved_number, message=msg, auto_send_enter=True)
-
-        # Step 4 & 5: Type and send message
-        self._publish_step_progress(task_label, 4, 5, "running")
-        if self.whatsapp is not None and getattr(self.whatsapp, "enabled", False):
-            if is_vn:
-                _, reply = self.whatsapp.send_voice_note(resolved_name, msg)
-            else:
-                _, reply = self.whatsapp.send_message(resolved_name, msg, phone_number=resolved_number)
-            self._publish_step_progress(task_label, 5, 5, "completed")
-            return reply
-
-        self._publish_step_progress(task_label, 5, 5, "completed")
-        return f"Sent '{msg}' to {resolved_name} on WhatsApp, sir."
-
     def _handle_whatsapp(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
-        self._entities["app"] = "whatsapp"
 
         if gd.get("last_person"):
             person = gd["last_person"].strip()
-            self._remember_person_entity(person)
             if self.rag is not None:
                 return self.rag.query_last_sent_message(person, platform="whatsapp")
-            return f"No recorded WhatsApp messages to {person}, sir."
+            return f"No recorded WhatsApp messages to {person}."
 
         if gd.get("open_only"):
             if self.phone_adb is not None and self.phone_adb.is_connected:
                 _, msg = self.phone_adb.open_app("whatsapp")
                 return msg
             self._open_whatsapp_visibly_on_pc()
-            return "Opened WhatsApp, sir."
+            return "Opened WhatsApp."
 
         if gd.get("read"):
             if self.whatsapp is not None:
@@ -1452,57 +1054,58 @@ class IntentRouter:
                 if msgs:
                     joined = "; ".join(f"{m['sender']} said {m['text']}" for m in msgs)
                     return f"Latest WhatsApp messages: {joined}"
-            return "No unread WhatsApp messages, sir."
+            return "No unread WhatsApp messages."
 
-        raw_contact = re.sub(r"^(?:my|to|too)\s+", "", (gd.get("contact") or "").strip(), flags=re.I).strip()
-        msg = re.sub(r"^(?:a|an|our)\s+", "", (gd.get("msg") or "").strip(), flags=re.I).strip()
+        raw_contact = re.sub(r"^(?:my|to)\s+", "", (gd.get("contact") or "").strip(), flags=re.I).strip()
+        msg = re.sub(r"^(?:a|an)\s+", "", (gd.get("msg") or "").strip(), flags=re.I).strip()
         is_vn = "voice note" in raw.lower()
 
-        if raw_contact.lower() in ("mummy", "mommy", "mammi", "mami", "mother", "mom", "maa", "mumbai"):
+        if raw_contact.lower() in ("mummy", "mommy", "mammi", "mami", "mother", "mom", "maa"):
             resolved_name = "Mom"
-            self._remember_person_entity("Mom", "mother")
         elif raw_contact.lower() in ("daddy", "papa", "papaji", "father", "dad"):
             resolved_name = "Dad"
-            self._remember_person_entity("Dad", "father")
         else:
             resolved_name = raw_contact.title()
-            self._remember_person_entity(resolved_name)
 
-        # Step 1: Resolve contact from SQLite
         resolved_number = ""
         if self.rag is not None and raw_contact:
-            lookup_key = "Mom" if resolved_name == "Mom" else ("Dad" if resolved_name == "Dad" else raw_contact)
-            contact_rec, err = self.rag.resolve_contact_or_disambiguate(lookup_key)
+            contact_rec, err = self.rag.resolve_contact_or_disambiguate(raw_contact)
             if err and "multiple contacts" in err.lower():
                 return err
             if contact_rec is not None:
                 resolved_name = contact_rec.name
-                self._remember_person_entity(contact_rec.name, contact_rec.relationship)
                 resolved_number = contact_rec.whatsapp or contact_rec.phone
-            if not resolved_number:
-                # Remember pending WhatsApp send so user can provide the number on the next turn
-                self._awaiting_contact_number = (resolved_name, msg or "Hello", "whatsapp")
+            else:
                 self._open_whatsapp_visibly_on_pc(message=msg)
-                return (
-                    f"Opened WhatsApp, sir, but I don't have {resolved_name}'s number saved yet. "
-                    f"Tell me {resolved_name}'s number and I'll save it and send the message."
-                )
+                return f"Opened WhatsApp, but I don't have {resolved_name}'s number saved yet."
 
         if not msg:
-            self._publish_step_progress(f"WhatsApp → {resolved_name}", 3, 3, "completed")
             if self.phone_adb is not None and self.phone_adb.is_connected and resolved_number:
                 self.phone_adb.open_whatsapp_chat(resolved_number)
             else:
                 self._open_whatsapp_visibly_on_pc(phone_number=resolved_number)
-            return f"Opened WhatsApp chat for {resolved_name}, sir."
+            return f"Opened WhatsApp chat for {resolved_name}."
 
         def _execute_send() -> str:
-            return self._execute_multistep_whatsapp_send(resolved_name, resolved_number, msg, is_vn=is_vn)
+            if self.rag is not None:
+                self.rag.record_sent_message(resolved_name, platform="whatsapp", message_text=msg)
+            if self.phone_adb is not None and self.phone_adb.is_connected and resolved_number and not is_vn:
+                self.phone_adb.open_whatsapp_chat(resolved_number, message=msg)
+            else:
+                self._open_whatsapp_visibly_on_pc(phone_number=resolved_number, message=msg)
+
+            if self.whatsapp is not None and getattr(self.whatsapp, "enabled", False):
+                if is_vn:
+                    _, reply = self.whatsapp.send_voice_note(resolved_name, msg)
+                    return reply
+                _, reply = self.whatsapp.send_message(resolved_name, msg, phone_number=resolved_number)
+                return reply
+            return f"Sent '{msg}' to {resolved_name} on WhatsApp."
 
         if self.confirm_messages:
             self._pending_action = _execute_send
             self._pending_description = f"send WhatsApp message to {resolved_name}"
-            return f"Send '{msg}' to {resolved_name} on WhatsApp, sir?"
+            return f"Send '{msg}' to {resolved_name} on WhatsApp?"
 
         return _execute_send()
 
@@ -1512,7 +1115,7 @@ class IntentRouter:
             if self.phone_adb is not None:
                 _, msg = self.phone_adb.unlock()
                 return msg
-            return "Phone unlocked, sir."
+            return "Phone unlocked."
 
         if gd.get("flash"):
             fl = gd["flash"].lower()
@@ -1520,27 +1123,25 @@ class IntentRouter:
             if self.phone_adb is not None:
                 _, msg = self.phone_adb.toggle_flashlight(enable)
                 return msg
-            return "Toggled phone flashlight, sir."
+            return "Toggled phone flashlight."
 
         if "battery" in raw.lower():
             if self.phone_adb is not None:
                 _, msg = self.phone_adb.get_battery_level()
                 return msg
-            return "Phone battery is at 82 percent, sir."
+            return "Phone battery is at 82 percent."
 
         if gd.get("app"):
             app_name = gd["app"].strip()
-            self._entities["app"] = app_name
             if self.phone_adb is not None:
                 _, msg = self.phone_adb.open_app(app_name)
                 return msg
-            return f"Opened {app_name} on your phone, sir."
+            return f"Opened {app_name} on your phone."
 
         raw_contact = (gd.get("contact") or "Mom").strip()
         sms_body = (gd.get("msg") or "").strip()
         resolved_name = raw_contact.title()
         target_dial = raw_contact
-        self._remember_person_entity(resolved_name)
 
         if self.rag is not None:
             contact_rec, err = self.rag.resolve_contact_or_disambiguate(raw_contact)
@@ -1548,7 +1149,6 @@ class IntentRouter:
                 return err
             if contact_rec is not None:
                 resolved_name = contact_rec.name
-                self._remember_person_entity(contact_rec.name, contact_rec.relationship)
                 target_dial = contact_rec.mobile_number or contact_rec.name
 
         if self.rag is not None and sms_body:
@@ -1559,97 +1159,59 @@ class IntentRouter:
             return f"Sent SMS to {resolved_name}: {sms_body}"
         return f"Sent SMS to {resolved_name}: {sms_body}"
 
-    def _execute_multistep_call(self, resolved_name: str, resolved_number: str, platform: str = "") -> str:
-        task_label = f"Call → {resolved_name}"
-        self._publish_step_progress(task_label, 1, 3, "running")
-        if platform == "whatsapp":
-            self._publish_step_progress(task_label, 2, 3, "running")
-            if self.phone_adb is not None and self.phone_adb.is_connected and resolved_number:
-                self.phone_adb.open_whatsapp_chat(resolved_number)
-            else:
-                self._open_whatsapp_visibly_on_pc(phone_number=resolved_number)
-            self._publish_step_progress(task_label, 3, 3, "completed")
-            return f"Opened WhatsApp for {resolved_name} so you can start the call, sir."
-
-        self._publish_step_progress(task_label, 2, 3, "running")
-        if self.phone_adb is not None:
-            _, msg = self.phone_adb.make_call(resolved_number, contact_name=resolved_name)
-            self._publish_step_progress(task_label, 3, 3, "completed")
-            return msg
-
-        self.bus.publish(
-            Topics.CALL_STATE,
-            {
-                "action": "start",
-                "direction": "outgoing",
-                "status": "ringing",
-                "name": resolved_name,
-                "number": resolved_number,
-                "meta": "Mobile · via phone bridge",
-            },
-            source="intent_router",
-        )
-        self._publish_step_progress(task_label, 3, 3, "completed")
-        return f"Calling {resolved_name}, sir."
-
     def _handle_phone_call(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
-        gd = match.groupdict()
-        raw_contact = (gd.get("contact") or "Mom").strip()
-        platform = (gd.get("platform") or "").strip().lower()
-
-        if raw_contact.lower() in ("mummy", "mommy", "mammi", "mami", "mother", "mom", "maa", "mumbai"):
-            resolved_name = "Mom"
-            self._remember_person_entity("Mom", "mother")
-        elif raw_contact.lower() in ("daddy", "papa", "papaji", "father", "dad"):
-            resolved_name = "Dad"
-            self._remember_person_entity("Dad", "father")
-        else:
-            resolved_name = raw_contact.title()
-            self._remember_person_entity(resolved_name)
-
+        raw_contact = (match.groupdict().get("contact") or "Mom").strip()
+        resolved_name = raw_contact.title()
         resolved_number = ""
+
         if self.rag is not None:
-            lookup_key = "Mom" if resolved_name == "Mom" else ("Dad" if resolved_name == "Dad" else raw_contact)
-            contact_rec, err = self.rag.resolve_contact_or_disambiguate(lookup_key)
+            contact_rec, err = self.rag.resolve_contact_or_disambiguate(raw_contact)
             if err and "multiple contacts" in err.lower():
                 return err
             if contact_rec is not None:
                 resolved_name = contact_rec.name
-                self._remember_person_entity(contact_rec.name, contact_rec.relationship)
                 resolved_number = contact_rec.phone or contact_rec.whatsapp
             if not resolved_number:
-                self._awaiting_contact_number = (resolved_name, "", "call")
-                return f"I don't have a number saved for {resolved_name} yet, sir. Tell me the number and I'll save it and place the call."
+                return f"I don't have a number saved for {resolved_name} yet."
 
         def _execute_call() -> str:
-            return self._execute_multistep_call(resolved_name, resolved_number, platform=platform)
+            if self.phone_adb is not None:
+                _, msg = self.phone_adb.make_call(resolved_number, contact_name=resolved_name)
+                return msg
+            self.bus.publish(
+                Topics.CALL_STATE,
+                {
+                    "action": "start",
+                    "direction": "outgoing",
+                    "status": "ringing",
+                    "name": resolved_name,
+                    "number": resolved_number,
+                    "meta": "Mobile · via phone bridge",
+                },
+                source="intent_router",
+            )
+            return f"Calling {resolved_name}."
 
         if self.confirm_calls:
             self._pending_action = _execute_call
             self._pending_description = f"call {resolved_name}"
-            return f"Call {resolved_name} at {resolved_number}, sir?"
+            return f"Call {resolved_name} at {resolved_number}?"
 
         return _execute_call()
 
     def _handle_personal_fact_statement(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
-        gd = match.groupdict()
-        person = gd.get("person") or gd.get("person2") or gd.get("person3")
-        rel = gd.get("rel") or ""
-        if person:
-            self._remember_person_entity(person.strip(), rel.strip())
-        input_text = ctx.get("raw_input") or raw
         if self.rag is not None:
-            learned = self.rag.auto_learn_from_statement(input_text)
+            learned = self.rag.auto_learn_from_statement(raw)
             if learned:
                 return learned
-        return "Saved to your profile, sir."
+        return "Saved to your profile."
 
     def _handle_memory(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
         if gd.get("recall") and self.rag is not None:
             query = (gd.get("query") or "").strip()
             found = self.rag.recall(query)
-            return found or f"No saved notes about {query}, sir."
+            return found or f"No saved notes about {query}."
 
         if gd.get("free_fact") and not gd.get("key") and self.rag is not None:
             fact_stmt = gd["free_fact"].strip()
@@ -1662,7 +1224,7 @@ class IntentRouter:
         val = (gd.get("value") or "").strip()
         if self.rag is not None:
             return self.rag.remember_fact(key, val)
-        return f"Saved {key} as {val}, sir."
+        return f"Saved {key} as {val}."
 
     def _handle_volume(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         gd = match.groupdict()
@@ -1682,14 +1244,16 @@ class IntentRouter:
             mute_flag = action == "mute"
             if self.system_ctrl is not None:
                 self.system_ctrl.set_mute(mute_flag)
-            return "Audio muted, sir." if mute_flag else "Audio unmuted, sir."
+            return "Audio muted." if mute_flag else "Audio unmuted."
 
+        # Explicit target level ("increase the volume to 100 percent", "set volume to 50%")
         if level_str is not None:
             lvl = max(0, min(100, int(level_str)))
             if self.system_ctrl is not None:
                 self.system_ctrl.set_volume(lvl)
             return f"Volume set to {lvl} percent."
 
+        # Explicit step amount ("increase the volume by 10 percent")
         if step_val_str is not None:
             amt = max(1, min(100, int(step_val_str)))
             signed = amt if step_dir in ("increase", "raise", "up") else -amt
@@ -1707,10 +1271,10 @@ class IntentRouter:
         if self.media_ctrl is not None:
             if "screenshot" in action or "screen" in action:
                 path = self.media_ctrl.take_screenshot()
-                return f"Screenshot saved to {path.name}, sir."
+                return f"Screenshot saved to {path.name}."
             if "minimize" in action or "desktop" in action:
                 self.media_ctrl.show_desktop()
-                return "Showing desktop, sir."
+                return "Showing desktop."
             if "next" in action or "skip" in action:
                 self.media_ctrl.next_track()
                 return "Skipped track."
@@ -1727,25 +1291,24 @@ class IntentRouter:
             return (
                 f"CPU is at {snap['cpu_percent']} percent, RAM is "
                 f"{snap['process_rss_gb']:.2f} gigabytes of 4 gigabytes, "
-                f"battery is at {snap['battery_percent']} percent, and VRAM is 0 megabytes, sir."
+                f"battery is at {snap['battery_percent']} percent, and VRAM is 0 megabytes."
             )
-        return "All systems nominal within the 4 gigabyte RAM budget and 0 megabytes VRAM, sir."
+        return "All systems nominal within the 4 gigabyte RAM budget and 0 megabytes VRAM."
 
     def _handle_web_search(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         query = (match.groupdict().get("query") or "").strip()
         if not query:
-            return "Please specify a search query, sir."
-        self._entities["topic"] = query
+            return "Specify a search query."
         if self.web_search is not None:
             return self.web_search.search_summary(query)
-        return f"Searching for {query}, sir."
+        return f"Searching for {query}."
 
     def _handle_close_app(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         target = (match.groupdict().get("target") or "").strip()
         if self.system_ctrl is not None:
             ok, msg = self.system_ctrl.close_application(target)
             return msg
-        return f"Closing {target}, sir."
+        return f"Closing {target}."
 
     def _handle_open_target(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         target = (match.groupdict().get("target") or "").strip()
@@ -1753,14 +1316,13 @@ class IntentRouter:
             ws_name = target.lower().replace("workspace", "").replace("my", "").strip() or "coding"
             return self._handle_workspace_launch(match, raw, {"ws": ws_name})
 
-        self._entities["app"] = target
         if self.system_ctrl is not None:
             ok, msg = self.system_ctrl.open_target(target)
             return msg
-        return f"Opening {target}, sir."
+        return f"Opening {target}."
 
     def _handle_time_date(self, match: re.Match[str], raw: str, ctx: Dict[str, Any]) -> str:
         now = datetime.now()
         if "date" in raw.lower() or "day" in raw.lower():
-            return f"Today is {now.strftime('%A, %B %d, %Y')}, sir."
-        return f"It is currently {now.strftime('%I:%M %p')}, sir."
+            return f"Today is {now.strftime('%A, %B %d, %Y')}."
+        return f"It is currently {now.strftime('%I:%M %p')}."
