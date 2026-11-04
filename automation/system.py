@@ -47,6 +47,13 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+<<<<<<< HEAD
+=======
+try:
+    import resource  # type: ignore
+except ImportError:
+    resource = None  # type: ignore
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
 try:
     import psutil  # type: ignore
@@ -1047,6 +1054,11 @@ class SystemController:
                     plugged = bool(bat.power_plugged)
             except Exception:
                 pass
+<<<<<<< HEAD
+=======
+        elif resource is not None:
+            try:
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 rss_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
             except Exception:
                 pass

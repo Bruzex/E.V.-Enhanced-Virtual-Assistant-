@@ -1,19 +1,31 @@
 # =============================================================================
+<<<<<<< HEAD
 # E.V. (Enhanced Virtual Assistant) - Master Configuration
+=======
+# E.V. (Enhanced Virtual Assistant) - Master Configuration (v2.1 Voice Tuned)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 # Target: MSI Bravo 15 (16 GB System RAM | AMD RX 6500M -> 0 MB VRAM)
 # =============================================================================
 
 app:
   name: "E.V."
   full_name: "Enhanced Virtual Assistant"
+<<<<<<< HEAD
   version: "3.3.0"
+=======
+  version: "2.1.0"
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
   offline_mode: true
   log_level: "INFO"
   log_file: "logs/ev.log"
   rss_log_file: "logs/rss.log"
 
 hardware:
+<<<<<<< HEAD
   ram_budget_gb: 8.0
+=======
+  ram_budget_gb: 4.0
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
   ram_warning_threshold_gb: 3.4
   ram_critical_threshold_gb: 3.8
   monitor_interval_ms: 1000
@@ -34,12 +46,23 @@ llm:
   use_mlock: false
   temperature: 0.3
   top_p: 0.9
+<<<<<<< HEAD
   max_tokens: 80
   unload_after_idle_seconds: 0
   system_prompt: >
     E.V., Enhanced Virtual Assistant, created by Bruprog.
     One or two spoken sentences. Act, then confirm.
     No follow-up question unless a required slot is missing.
+=======
+  max_tokens: 256
+  unload_after_idle_seconds: 300
+  system_prompt: >
+    You are E.V. (Enhanced Virtual Assistant), a calm, articulate, slightly formal
+    yet warm sci-fi AI assistant created by Bruprog and inspired by JARVIS.
+    Never repeat the user's words with 'I heard', never mention model filenames,
+    and never read out personal profile data unless explicitly asked.
+    Keep responses concise (1 to 2 sentences) so they sound natural when spoken aloud.
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
 voice:
   wake_word:
@@ -53,6 +76,7 @@ voice:
       - "okay evie"
       - "ok evie"
       - "hi evie"
+<<<<<<< HEAD
       - "hello evie"
       - "okay ev"
     continuous_listening: true
@@ -60,15 +84,31 @@ voice:
     session_timeout_seconds: 90.0
     energy_gate_threshold: 0.0018
     barge_in_energy_threshold: 0.08
+=======
+      - "okay ev"
+    continuous_listening: true
+    command_timeout_seconds: 15.0
+    session_timeout_seconds: 60.0
+    energy_gate_threshold: 0.0025
+    barge_in_energy_threshold: 0.030
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     confirmation_sound: true
 
   stt:
     engine: "vosk"
+<<<<<<< HEAD
     model_path: "models/vosk-model-en-in-0.5"
     sample_rate: 16000
     chunk_size: 2000
     min_confidence: 0.38
     tts_cooldown_ms: 500
+=======
+    model_path: "models/vosk-model-small-en-us"
+    sample_rate: 16000
+    chunk_size: 2000
+    min_confidence: 0.48
+    tts_cooldown_ms: 450
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     input_device_index: null
 
   tts:
@@ -83,12 +123,21 @@ voice:
   clap_detector:
     enabled: true
     required_claps: 2
+<<<<<<< HEAD
     energy_threshold: 0.18
     peak_threshold: 0.35
     crest_factor_min: 4.5
     double_clap_min_gap_ms: 120
     double_clap_max_gap_ms: 700
     cooldown_seconds: 1.5
+=======
+    energy_threshold: 0.065
+    peak_threshold: 0.16
+    crest_factor_min: 2.0
+    double_clap_min_gap_ms: 80
+    double_clap_max_gap_ms: 850
+    cooldown_seconds: 1.2
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     action: "toggle_listening"
 
 automation:
@@ -157,6 +206,10 @@ gui:
     success: "#3DF5A7"
 
 security:
+<<<<<<< HEAD
+=======
+  # Permission & confirmation controls for sensitive personal actions
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
   require_confirmation_for_messages: false
   require_confirmation_for_calls: false
   mask_pii_in_logs: true

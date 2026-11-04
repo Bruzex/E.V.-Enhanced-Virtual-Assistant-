@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+<<<<<<< HEAD
 E.V. (Enhanced Virtual Assistant) — Interruptible Offline Text-to-Speech (`voice/tts.py`)
 =========================================================================================
 Fast, CPU-optimized neural Text-to-Speech wrapper (Piper TTS + Windows SAPI5) with:
@@ -12,27 +13,60 @@ Fast, CPU-optimized neural Text-to-Speech wrapper (Piper TTS + Windows SAPI5) wi
        `chunk.audio_int16_array.tobytes()`).
   2. Instant <150ms Barge-In Interruption (`interrupt()`):
      Stops Piper audio playback immediately and calls `brain.cancel()`.
+=======
+E.V. (Enhanced Virtual Assistant) — Offline Text-to-Speech (Piper TTS + Windows SAPI5)
+======================================================================================
+Fast, CPU-optimized neural Text-to-Speech wrapper using Piper TTS with automatic
+local Windows binary discovery and Windows SAPI5 offline voice fallback.
+
+Supports 3 Synthesis Routes (in priority order):
+  1. Native Python `piper.PiperVoice` ONNX runtime (if `piper-tts` Python wheel is installed).
+  2. Standalone Windows/Linux `piper` CLI binary:
+     Automatically checks `models/piper/piper.exe`, `models/piper/piper/piper.exe`,
+     and system `PATH` — so `piper_windows_amd64.zip` works out-of-the-box on any
+     Python version (including Python 3.12–3.14) with zero C++ compilation!
+  3. Windows SAPI5 Offline Speech Synthesizer fallback (`System.Speech.Synthesis`):
+     Guarantees E.V. ALWAYS speaks out loud through your speakers on Windows even
+     before `piper.exe` or `piper-tts` is installed.
+
+Supports 3 Audio Playback Routes:
+  1. `sounddevice` (with `numpy`)
+  2. `PyAudio`
+  3. Built-in Windows `winsound.PlaySound` (zero external dependencies)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 """
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 import collections.abc
 import inspect
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 import io
 import logging
 import os
 import platform
 import queue
+<<<<<<< HEAD
 import re
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 import shutil
 import subprocess
 import threading
 import time
 import wave
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.event_bus import Event, EventBus, Topics, get_event_bus
+=======
+from typing import Any, Dict, Optional
+
+from core.event_bus import EventBus, Topics, get_event_bus
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
 try:
     from piper.voice import PiperVoice  # type: ignore
@@ -69,9 +103,15 @@ except Exception:
 
 class PiperTTS:
     """
+<<<<<<< HEAD
     Non-blocking, sentence-chunked TTS engine supporting both old and new PiperVoice
     APIs, instant voice barge-in (`interrupt()` -> stops audio + calls `brain.cancel()`),
     and continuation (`resume()`).
+=======
+    Non-blocking background TTS worker queue that synthesizes speech with Piper
+    (or Windows offline SAPI5 fallback) and drives the HUD Status Orb `speaking`
+    state + caption display.
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     """
 
     def __init__(
@@ -79,12 +119,18 @@ class PiperTTS:
         config: Dict[str, Any],
         base_dir: Path,
         event_bus: Optional[EventBus] = None,
+<<<<<<< HEAD
         brain: Optional[Any] = None,
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     ) -> None:
         self.config = config
         self.base_dir = base_dir
         self.bus = event_bus or get_event_bus()
+<<<<<<< HEAD
         self.brain = brain
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         self.logger = logging.getLogger("ev.tts")
         self.is_windows = platform.system().lower().startswith("win")
 
@@ -106,6 +152,7 @@ class PiperTTS:
         self._voice: Optional[Any] = None
         self._piper_bin: Optional[str] = self._discover_piper_binary()
         self._lock = threading.RLock()
+<<<<<<< HEAD
         self._is_speaking = threading.Event()
         self._active_proc: Optional[subprocess.Popen[Any]] = None
 
@@ -118,6 +165,13 @@ class PiperTTS:
 
         self.bus.subscribe("voice.interrupt", self._on_bus_interrupt)
 
+=======
+
+        # Asynchronous speech queue so `speak()` never blocks the caller or GUI
+        self._queue: "queue.Queue[Optional[tuple[str, Optional[int], bool]]]" = queue.Queue()
+        self._stop_event = threading.Event()
+        self._abort_current = threading.Event()
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         self._worker_thread = threading.Thread(
             target=self._tts_worker_loop,
             name="EV-PiperTTS-Worker",
@@ -125,6 +179,7 @@ class PiperTTS:
         )
         self._worker_thread.start()
 
+<<<<<<< HEAD
     def set_brain(self, brain: Any) -> None:
         self.brain = brain
 
@@ -141,6 +196,10 @@ class PiperTTS:
             return len(self._interrupted_sentences) > 0
 
     def _discover_piper_binary(self) -> Optional[str]:
+=======
+    def _discover_piper_binary(self) -> Optional[str]:
+        """Locate standalone `piper.exe` / `piper` binary in `models/piper/` or system PATH."""
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         candidates = [
             self.base_dir / "models" / "piper" / "piper.exe",
             self.base_dir / "models" / "piper" / "piper" / "piper.exe",
@@ -153,22 +212,45 @@ class PiperTTS:
         return shutil.which("piper") or shutil.which("piper.exe")
 
     def load_model(self) -> bool:
+<<<<<<< HEAD
+=======
+        """Load the Piper ONNX voice model via Python API or standalone `piper.exe` binary."""
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         with self._lock:
             if self._voice is not None:
                 return True
 
+<<<<<<< HEAD
             self._piper_bin = self._discover_piper_binary()
 
             if not self.model_path.exists():
+=======
+            # Refresh binary discovery in case user just extracted piper_windows_amd64.zip
+            self._piper_bin = self._discover_piper_binary()
+
+            if not self.model_path.exists():
+                self.logger.info(
+                    "Piper ONNX model not found at %s; will use Windows offline SAPI5 voice fallback.",
+                    self.model_path,
+                )
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 return False
 
             if PIPER_PYTHON_AVAILABLE and PiperVoice is not None:
                 try:
+<<<<<<< HEAD
+=======
+                    self.logger.info("Loading Piper neural TTS voice from %s...", self.model_path.name)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                     cfg_str = str(self.config_path) if self.config_path.exists() else None
                     self._voice = PiperVoice.load(
                         str(self.model_path),
                         config_path=cfg_str,
+<<<<<<< HEAD
                         use_cuda=False,
+=======
+                        use_cuda=False,  # STRICT CPU-ONLY
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                     )
                     return True
                 except Exception as exc:
@@ -179,10 +261,17 @@ class PiperTTS:
                 return True
 
             if self.is_windows:
+<<<<<<< HEAD
+=======
+                self.logger.info(
+                    "Piper Python wheel / piper.exe not yet present; Windows offline SAPI5 voice active."
+                )
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 return True
 
             return False
 
+<<<<<<< HEAD
     @staticmethod
     def _split_into_sentences(text: str) -> List[str]:
         cleaned = re.sub(r"\s+", " ", (text or "").strip())
@@ -191,11 +280,14 @@ class PiperTTS:
         parts = re.split(r"(?<=[.!?])\s+", cleaned)
         return [p.strip() for p in parts if p.strip()]
 
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     def speak(
         self,
         text: str,
         output_device_index: Optional[int] = None,
         block: bool = False,
+<<<<<<< HEAD
         append: bool = False,
     ) -> None:
         sentences = self._split_into_sentences(text)
@@ -227,6 +319,30 @@ class PiperTTS:
             except Exception:
                 pass
 
+=======
+    ) -> None:
+        """
+        Queue `text` to be spoken by E.V.
+        If `block=True`, waits until playback completes; otherwise returns immediately.
+        """
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+
+        if block:
+            self._synthesize_and_play(cleaned, output_device_index)
+        else:
+            self._queue.put((cleaned, output_device_index, False))
+
+    def stop(self) -> None:
+        """Interrupt active speech playback and clear pending utterances."""
+        self._abort_current.set()
+        if WINSOUND_AVAILABLE and winsound is not None:
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
@@ -234,6 +350,7 @@ class PiperTTS:
             except queue.Empty:
                 break
 
+<<<<<<< HEAD
         if SOUNDDEVICE_AVAILABLE and sd is not None:
             try:
                 sd.stop()
@@ -273,18 +390,31 @@ class PiperTTS:
 
     def shutdown(self) -> None:
         self.interrupt()
+=======
+    def shutdown(self) -> None:
+        """Stop the background TTS worker thread cleanly."""
+        self.stop()
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         self._stop_event.set()
         self._queue.put(None)
         if self._worker_thread.is_alive():
             self._worker_thread.join(timeout=1.5)
 
     # =========================================================================
+<<<<<<< HEAD
     # Internal Sentence-Chunked Playback Loop
+=======
+    # Internal Synthesis & Playback Pipeline
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     # =========================================================================
     def _tts_worker_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
+<<<<<<< HEAD
                 item = self._queue.get(timeout=0.3)
+=======
+                item = self._queue.get(timeout=0.5)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             except queue.Empty:
                 continue
 
@@ -292,14 +422,21 @@ class PiperTTS:
                 self._queue.task_done()
                 break
 
+<<<<<<< HEAD
             sentences, dev_idx = item
             try:
                 self._synthesize_and_play_sentences(sentences, dev_idx)
+=======
+            text, dev_idx, _ = item
+            try:
+                self._synthesize_and_play(text, dev_idx)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             except Exception as exc:
                 self.logger.error("TTS worker error: %s", exc, exc_info=True)
             finally:
                 self._queue.task_done()
 
+<<<<<<< HEAD
     def _synthesize_and_play_sentences(
         self,
         sentences: List[str],
@@ -365,12 +502,48 @@ class PiperTTS:
                 pcm = bytes(chunk)
             if pcm:
                 wav_file.writeframes(pcm)
+=======
+    def _synthesize_and_play(self, text: str, output_device_index: Optional[int] = None) -> None:
+        self._abort_current.clear()
+        dev = output_device_index if output_device_index is not None else self.output_device_index
+
+        estimated_ms = max(2000, min(12000, int(len(text) * 65)))
+
+        self.bus.publish(Topics.VOICE_TTS_STARTED, {"text": text}, source="tts")
+        self.bus.publish(Topics.ORB_STATE, {"state": "speaking", "progress": 0.0}, source="tts")
+        self.bus.publish(
+            Topics.CAPTION,
+            {"speaker": "ev", "text": text, "hold_ms": estimated_ms + 400},
+            source="tts",
+        )
+
+        t0 = time.monotonic()
+        played_audio = False
+
+        try:
+            wav_bytes = self._synthesize_wav_bytes(text)
+            if wav_bytes and not self._abort_current.is_set():
+                played_audio = self._play_wav_bytes(wav_bytes, dev)
+
+            # Fallback 2: Built-in Windows Offline SAPI5 Speech Synthesizer (guarantees audible voice on Windows)
+            if not played_audio and self.is_windows and not self._abort_current.is_set():
+                played_audio = self._speak_windows_sapi5(text)
+
+            if not played_audio and not self._abort_current.is_set():
+                target_s = estimated_ms / 1000.0
+                while (time.monotonic() - t0) < target_s and not self._abort_current.is_set():
+                    time.sleep(0.05)
+        finally:
+            self.bus.publish(Topics.VOICE_TTS_FINISHED, {"text": text}, source="tts")
+            self.bus.publish(Topics.ORB_STATE, {"state": "idle", "progress": 0.0}, source="tts")
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
     def _synthesize_wav_bytes(self, text: str) -> Optional[bytes]:
         if not self.load_model():
             return None
 
         with self._lock:
+<<<<<<< HEAD
             if self._voice is not None:
                 buf = io.BytesIO()
                 wav_file = wave.open(buf, "wb")
@@ -422,6 +595,25 @@ class PiperTTS:
                 if nframes > 0:
                     return buf.getvalue()
 
+=======
+            # Route 1: Native Python piper.PiperVoice
+            if self._voice is not None:
+                try:
+                    buf = io.BytesIO()
+                    with wave.open(buf, "wb") as wav_file:
+                        self._voice.synthesize(
+                            text,
+                            wav_file,
+                            speaker_id=self.speaker_id,
+                            length_scale=self.length_scale,
+                            noise_scale=self.noise_scale,
+                        )
+                    return buf.getvalue()
+                except Exception as exc:
+                    self.logger.error("PiperVoice synthesis error: %s", exc)
+
+            # Route 2: Standalone piper.exe CLI binary
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             if self._piper_bin and self.model_path.exists():
                 try:
                     cmd = [
@@ -432,6 +624,7 @@ class PiperTTS:
                     ]
                     if self.config_path.exists():
                         cmd.extend(["--config", str(self.config_path)])
+<<<<<<< HEAD
                     self._active_proc = subprocess.Popen(
                         cmd,
                         stdin=subprocess.PIPE,
@@ -457,6 +650,26 @@ class PiperTTS:
                     self.logger.error("Piper CLI synthesis error: %s", exc)
                 finally:
                     self._active_proc = None
+=======
+                    proc = subprocess.run(
+                        cmd,
+                        input=text.encode("utf-8"),
+                        capture_output=True,
+                        cwd=str(Path(self._piper_bin).parent),
+                        timeout=12,
+                        check=False,
+                    )
+                    if proc.returncode == 0 and proc.stdout:
+                        buf = io.BytesIO()
+                        with wave.open(buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(22050)
+                            wf.writeframes(proc.stdout)
+                        return buf.getvalue()
+                except Exception as exc:
+                    self.logger.error("Piper CLI synthesis error: %s", exc)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
         return None
 
@@ -471,6 +684,7 @@ class PiperTTS:
             self.logger.error("Invalid WAV buffer from Piper: %s", exc)
             return False
 
+<<<<<<< HEAD
         if SOUNDDEVICE_AVAILABLE and sd is not None and np is not None:
             try:
                 audio_np = np.frombuffer(frames, dtype=np.int16)
@@ -483,10 +697,18 @@ class PiperTTS:
                         return True
                     time.sleep(0.025)
                 sd.wait()
+=======
+        # Route 1: SoundDevice + NumPy (supports explicit output_device_index for VB-Audio)
+        if SOUNDDEVICE_AVAILABLE and sd is not None and np is not None:
+            try:
+                audio_np = np.frombuffer(frames, dtype=np.int16)
+                sd.play(audio_np, samplerate=rate, device=device_index, blocking=True)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 return True
             except Exception as exc:
                 self.logger.warning("SoundDevice playback failed, trying winsound: %s", exc)
 
+<<<<<<< HEAD
         if WINSOUND_AVAILABLE and winsound is not None and device_index is None:
             try:
                 duration_s = len(frames) / float(max(1, rate * channels * sampwidth))
@@ -497,10 +719,20 @@ class PiperTTS:
                         winsound.PlaySound(None, winsound.SND_PURGE)
                         return True
                     time.sleep(0.025)
+=======
+        # Route 2: Built-in Windows winsound (zero external dependencies)
+        if WINSOUND_AVAILABLE and winsound is not None and device_index is None:
+            try:
+                winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 return True
             except Exception as exc:
                 self.logger.warning("winsound playback failed: %s", exc)
 
+<<<<<<< HEAD
+=======
+        # Route 3: PyAudio fallback
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if PYAUDIO_AVAILABLE and pyaudio is not None:
             pa = pyaudio.PyAudio()
             stream = None
@@ -514,13 +746,22 @@ class PiperTTS:
                 if device_index is not None:
                     kwargs["output_device_index"] = int(device_index)
                 stream = pa.open(**kwargs)
+<<<<<<< HEAD
                 step = 1024
+=======
+                step = 4096
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 for offset in range(0, len(frames), step):
                     if self._abort_current.is_set():
                         break
                     stream.write(frames[offset : offset + step])
                 return True
+<<<<<<< HEAD
             except Exception:
+=======
+            except Exception as exc:
+                self.logger.warning("PyAudio playback failed: %s", exc)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
                 return False
             finally:
                 if stream is not None:
@@ -534,6 +775,10 @@ class PiperTTS:
         return False
 
     def _speak_windows_sapi5(self, text: str) -> bool:
+<<<<<<< HEAD
+=======
+        """Offline Windows SAPI5 speech synthesis fallback when Piper binary/wheel isn't installed yet."""
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         safe_text = text.replace("'", " ").replace('"', " ")
         ps_cmd = (
             "Add-Type -AssemblyName System.Speech; "
@@ -542,6 +787,7 @@ class PiperTTS:
             f"$synth.Speak('{safe_text}')"
         )
         try:
+<<<<<<< HEAD
             self._active_proc = subprocess.Popen(
                 ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_cmd],
                 stdout=subprocess.DEVNULL,
@@ -557,3 +803,16 @@ class PiperTTS:
             return False
         finally:
             self._active_proc = None
+=======
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+            )
+            return True
+        except Exception as exc:
+            self.logger.debug("Windows SAPI5 fallback error: %s", exc)
+            return False
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b

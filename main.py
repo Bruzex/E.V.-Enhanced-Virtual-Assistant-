@@ -288,16 +288,24 @@ class SystemBridge(QObject):
 
     def _on_bus_user_command(self, event: Event) -> None:
         text = str(event.payload.get("text", "")).strip()
+<<<<<<< HEAD
         confidence = float(event.payload.get("confidence", 1.0))
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         if not text:
             return
         threading.Thread(
             target=self._process_command_worker,
+<<<<<<< HEAD
             args=(text, confidence),
+=======
+            args=(text,),
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
             name="EV-IntentRouter-Worker",
             daemon=True,
         ).start()
 
+<<<<<<< HEAD
     def _process_command_worker(self, command_text: str, confidence: float = 1.0) -> None:
         try:
             spoken_prefix = [""]
@@ -322,6 +330,16 @@ class SystemBridge(QObject):
         except Exception as exc:
             self.logger.error("Command routing error: %s", exc, exc_info=True)
             self.orb_state_changed.emit("listening", 0.0)
+=======
+    def _process_command_worker(self, command_text: str) -> None:
+        try:
+            match = self.intent_router.route(command_text)
+            if match.response_text:
+                self.tts.speak(match.response_text, block=False)
+        except Exception as exc:
+            self.logger.error("Command routing error: %s", exc, exc_info=True)
+            self.orb_state_changed.emit("idle", 0.0)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
     # =========================================================================
     # GUI ControlStrip & Overlay Button Handlers -> Real Backend Services
@@ -551,13 +569,20 @@ def main() -> int:
     event_bus = get_event_bus()
     brain = Brain(config=config, base_dir=base_dir, event_bus=event_bus)
     stt = VoskSTT(config=config, base_dir=base_dir, event_bus=event_bus)
+<<<<<<< HEAD
     tts = PiperTTS(config=config, base_dir=base_dir, event_bus=event_bus, brain=brain)
+=======
+    tts = PiperTTS(config=config, base_dir=base_dir, event_bus=event_bus)
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     clap_detector = ClapDetector(config=config, event_bus=event_bus)
     wakeword = WakeWordLoop(
         config=config,
         stt=stt,
+<<<<<<< HEAD
         tts=tts,
         brain=brain,
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         event_bus=event_bus,
         on_raw_audio_chunk=clap_detector.process_pcm_frame,
     )

@@ -12,6 +12,10 @@ import time
 import unittest
 from pathlib import Path
 import tempfile
+<<<<<<< HEAD
+=======
+import yaml
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
 from core.event_bus import EventBus, Topics
 from core.intent_router import IntentRouter
@@ -27,9 +31,14 @@ class MockBrain:
         self.calls: int = 0
         self.last_prompt: str = ""
         self.last_context: str | None = None
+<<<<<<< HEAD
         self.is_model_loaded: bool = True
 
     def generate(self, prompt: str, extra_context: str | None = None, **kwargs) -> str:
+=======
+
+    def generate(self, prompt: str, extra_context: str | None = None) -> str:
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         self.calls += 1
         self.last_prompt = prompt
         self.last_context = extra_context
@@ -153,27 +162,47 @@ class TestIntentRouterAndPhase3(unittest.TestCase):
         self.assertTrue(m2.handled_by_fast_path)
         self.assertIn("Neovim", m2.response_text)
 
+<<<<<<< HEAD
+=======
+        # Open-ended query should inject RAG memory into Brain.generate()
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         m3 = self.router.route("Why do developers enjoy using my favorite editor?")
         self.assertFalse(m3.handled_by_fast_path)
         self.assertEqual(self.brain.calls, 1)
         self.assertIsNotNone(self.brain.last_context)
         self.assertIn("Neovim", self.brain.last_context or "")
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
     def test_dynamic_contacts_save_and_call(self) -> None:
         call_events = []
         self.bus.subscribe(Topics.CALL_STATE, lambda e: call_events.append(e.payload))
 
+<<<<<<< HEAD
+=======
+        # 1. Save new contact
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         res_save = self.router.route("remember that John's phone number is +1 (555) 019-9988")
         self.assertEqual(res_save.intent_name, "personal_fact_statement")
         self.assertIn("John", res_save.response_text)
         self.assertIn("+1 (555) 019-9988", res_save.response_text)
 
+<<<<<<< HEAD
+=======
+        # 2. Call dynamic contact
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         res_call = self.router.route("call John")
         self.assertEqual(res_call.intent_name, "phone_call")
         self.assertTrue(len(call_events) >= 1)
         self.assertEqual(call_events[-1]["name"], "John")
         self.assertEqual(call_events[-1]["number"], "+1 (555) 019-9988")
 
+<<<<<<< HEAD
+=======
+        # 3. Call unknown contact prompts to save
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
         res_unknown = self.router.route("call Alice")
         self.assertEqual(res_unknown.intent_name, "phone_call")
         self.assertIn("don't have a number saved for Alice", res_unknown.response_text)
@@ -183,6 +212,7 @@ class TestIntentRouterAndPhase3(unittest.TestCase):
         self.assertEqual(match.intent_name, "workspace_selective_launch")
         self.assertTrue(match.handled_by_fast_path)
 
+<<<<<<< HEAD
     def test_timer_for_of_off_ten_seconds_and_volume_to_by(self) -> None:
         countdowns = []
         self.bus.subscribe(Topics.COUNTDOWN_UPDATE, lambda e: countdowns.append(e.payload))
@@ -219,6 +249,8 @@ class TestIntentRouterAndPhase3(unittest.TestCase):
         m_whoami = self.router.route("Hey Evie who I am")
         self.assertEqual(m_whoami.response_text, "You are Aditya Raj.")
 
+=======
+>>>>>>> 3230d22d1bc56527499a9e289635632005c0d31b
 
 if __name__ == "__main__":
     unittest.main()
