@@ -1,0 +1,162 @@
+# =============================================================================
+# E.V. (Enhanced Virtual Assistant) - Master Configuration
+# Target: MSI Bravo 15 (16 GB System RAM | AMD RX 6500M -> 0 MB VRAM)
+# =============================================================================
+
+app:
+  name: "E.V."
+  full_name: "Enhanced Virtual Assistant"
+  version: "3.3.0"
+  offline_mode: true
+  log_level: "INFO"
+  log_file: "logs/ev.log"
+  rss_log_file: "logs/rss.log"
+
+hardware:
+  ram_budget_gb: 8.0
+  ram_warning_threshold_gb: 3.4
+  ram_critical_threshold_gb: 3.8
+  monitor_interval_ms: 1000
+  rss_log_interval_seconds: 10
+  strict_cpu_only: true
+  aggressive_gc: true
+
+llm:
+  provider: "llama_cpp"
+  model_path: "models/qwen2.5-3b-instruct-q4_k_m.gguf"
+  # HARD CONSTRAINT: RX 6500M crashes on LLM tokenization; NEVER change from 0
+  n_gpu_layers: 0
+  n_ctx: 2048
+  n_batch: 256
+  n_threads: 6
+  n_threads_batch: 6
+  use_mmap: true
+  use_mlock: false
+  temperature: 0.3
+  top_p: 0.9
+  max_tokens: 80
+  unload_after_idle_seconds: 0
+  system_prompt: >
+    E.V., Enhanced Virtual Assistant, created by Bruprog.
+    One or two spoken sentences. Act, then confirm.
+    No follow-up question unless a required slot is missing.
+
+voice:
+  wake_word:
+    enabled: true
+    phrases:
+      - "hey evie"
+      - "hey e v"
+      - "hey e.v."
+      - "hey ev"
+      - "evie"
+      - "okay evie"
+      - "ok evie"
+      - "hi evie"
+      - "hello evie"
+      - "okay ev"
+    continuous_listening: true
+    command_timeout_seconds: 20.0
+    session_timeout_seconds: 90.0
+    energy_gate_threshold: 0.0018
+    barge_in_energy_threshold: 0.08
+    confirmation_sound: true
+
+  stt:
+    engine: "vosk"
+    model_path: "models/vosk-model-en-in-0.5"
+    sample_rate: 16000
+    chunk_size: 2000
+    min_confidence: 0.38
+    tts_cooldown_ms: 500
+    input_device_index: null
+
+  tts:
+    engine: "piper"
+    model_path: "models/piper/en_US-lessac-medium.onnx"
+    config_path: "models/piper/en_US-lessac-medium.onnx.json"
+    speaker_id: 0
+    length_scale: 0.95
+    noise_scale: 0.667
+    output_device_index: null
+
+  clap_detector:
+    enabled: true
+    required_claps: 2
+    energy_threshold: 0.18
+    peak_threshold: 0.35
+    crest_factor_min: 4.5
+    double_clap_min_gap_ms: 120
+    double_clap_max_gap_ms: 700
+    cooldown_seconds: 1.5
+    action: "toggle_listening"
+
+automation:
+  workspaces_dir: "data/workspaces"
+  default_workspace: "coding"
+  sequential_delay_ms: 520
+  undo_delay_ms: 150
+  max_parallel_group: 2
+  execute_os_actions: true
+  web_search_max_results: 4
+
+remote:
+  whatsapp:
+    enabled: false
+    headless: true
+    chrome_profile_dir: "data/chrome_whatsapp_profile"
+    poll_interval_seconds: 5.0
+
+  phone_adb:
+    enabled: true
+    host: "192.168.1.105"
+    port: 5555
+    adb_binary: "adb"
+    connect_timeout_seconds: 3.0
+    unlock_pin: null
+    # Personal contacts are stored in SQLite (data/memory.db), never in config.yaml
+    contacts: {}
+
+  audio_routing:
+    enabled: true
+    virtual_cable_input_hint: "CABLE Input (VB-Audio Virtual Cable)"
+    virtual_cable_output_hint: "CABLE Output (VB-Audio Virtual Cable)"
+
+memory:
+  enabled: true
+  sqlite_path: "data/memory.db"
+  chroma_dir: "data/chroma"
+  collection_name: "ev_long_term_memory"
+  top_k: 3
+
+gui:
+  title: "E.V. — Enhanced Virtual Assistant"
+  width: 1440
+  height: 900
+  min_width: 1024
+  min_height: 640
+  fullscreen: false
+  frameless: false
+  fps: 30
+  background_effect: "grid-and-particles"
+  particle_density: 70
+  scanlines: true
+  minimal_ui: false
+  default_countdown_seconds: 30
+  theme:
+    bg: "#0B0F19"
+    deep: "#060912"
+    panel: "#0D1422"
+    line: "#1B2A3F"
+    cyan: "#00D4FF"
+    purple: "#7B61FF"
+    text: "#E6F4FF"
+    muted: "#8AA4BF"
+    faint: "#4A6079"
+    danger: "#FF4D6D"
+    success: "#3DF5A7"
+
+security:
+  require_confirmation_for_messages: false
+  require_confirmation_for_calls: false
+  mask_pii_in_logs: true

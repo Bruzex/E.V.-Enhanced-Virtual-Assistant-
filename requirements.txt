@@ -1,0 +1,41 @@
+# =============================================================================
+# E.V. (Enhanced Virtual Assistant) - Python 3.10+ Dependencies
+# Hardware Target: MSI Bravo 15 (16 GB RAM, AMD Radeon RX 6500M - 0 VRAM)
+# Memory Ceiling: Peak RSS <= 4.0 GB | Strict CPU-only LLM execution
+# =============================================================================
+
+# --- Core Configuration & Utilities ---
+PyYAML>=6.0.1
+psutil>=5.9.8
+numpy>=1.26.4
+
+# --- Local LLM Engine (Strictly CPU-only: build/run with n_gpu_layers=0) ---
+llama-cpp-python>=0.2.90
+
+# --- Offline Speech-to-Text (Vosk), Text-to-Speech (Piper) & Audio I/O ---
+vosk>=0.3.45
+piper-tts>=1.2.0
+# PyAudio is optional; E.V. uses sounddevice + winsound (zero C++ compilation required on Windows)
+# PyAudio>=0.2.14
+sounddevice>=0.4.6
+
+# --- Holographic Desktop GUI (PyQt6 primary, PyQt5 supported fallback) ---
+PyQt6>=6.6.1
+
+# --- System & Desktop Automation ---
+PyAutoGUI>=0.9.54
+Pillow>=10.2.0
+
+# --- Remote Control (WhatsApp Web & Wireless ADB Bridge) ---
+selenium>=4.18.1
+webdriver-manager>=4.0.1
+pure-python-adb>=0.3.0.dev0
+
+# --- Long-Term Memory (SQLite3 built-in + ChromaDB Vector RAG) ---
+chromadb>=0.4.24
+
+# --- Live Web Search (Zero API Key) ---
+duckduckgo-search>=5.3.0
+
+# --- Testing ---
+pytest>=8.0.0
