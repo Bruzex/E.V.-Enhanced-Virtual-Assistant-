@@ -1,3 +1,4 @@
+
 # Python
 __pycache__/
 *.py[cod]
@@ -27,6 +28,7 @@ ENV/
 # Model Weights (Large binaries)
 models/*.gguf
 models/vosk-model-*/
+models/vosk-model-en-in-0.5.zip
 models/piper/*
 !models/.gitkeep
 
@@ -39,4 +41,3 @@ data/whatsapp_profile/
 # PyCharm / VS Code
 .vscode/
 .idea/
-

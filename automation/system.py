@@ -39,6 +39,7 @@ import glob
 import logging
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -308,6 +309,8 @@ class SystemController:
         # Cached index of Start Menu shortcuts (.lnk) & installed executables
         self._app_index: Dict[str, str] = {}
         self._index_built: bool = False
+        auto_cfg = self.config.get("automation", {})
+        self.execute_os_actions: bool = bool(auto_cfg.get("execute_os_actions", True))
 
     # =========================================================================
     # Deep Windows Start Menu & Program Directories Indexer
@@ -360,47 +363,50 @@ class SystemController:
         if q in self._app_index:
             return self._app_index[q]
 
-        # 2. Substring / token match (prefer shortest matching shortcut name)
+        # 2. Substring / word boundary match (require word boundary or len >= 3 to prevent noise words like 'me')
         matches: List[Tuple[int, str]] = []
         for stem, full_path in self._app_index.items():
-            if q in stem or stem in q:
+            if stem == q:
+                return full_path
+            stem_words = stem.split()
+            if q in stem_words or (len(q) >= 3 and (stem.startswith(q) or bool(re.search(rf"\b{re.escape(q)}\b", stem)))):
                 matches.append((len(stem), full_path))
         if matches:
             matches.sort(key=lambda pair: pair[0])
             return matches[0][1]
 
         # 3. Direct scan of %LOCALAPPDATA%\Programs and %PROGRAMFILES% top-level folders
-        prog_roots = [
-            os.path.expandvars(r"%LOCALAPPDATA%\Programs"),
-            os.path.expandvars(r"%LOCALAPPDATA%"),
-            os.path.expandvars(r"%APPDATA%"),
-            os.path.expandvars(r"%PROGRAMFILES%"),
-            os.path.expandvars(r"%PROGRAMFILES(X86)%"),
-        ]
-        q_nospace = q.replace(" ", "")
-        for p_root in prog_roots:
-            if not p_root or not os.path.isdir(p_root):
-                continue
-            try:
-                for entry in os.scandir(p_root):
-                    if not entry.is_dir():
-                        continue
-                    folder_low = entry.name.lower().replace(" ", "")
-                    if q_nospace in folder_low or folder_low in q_nospace:
-                        # Search 1-2 levels deep for main .exe
-                        for pattern in [
-                            os.path.join(entry.path, "*.exe"),
-                            os.path.join(entry.path, "app-*", "*.exe"),
-                            os.path.join(entry.path, "bin", "*.exe"),
-                            os.path.join(entry.path, "Application", "*.exe"),
-                        ]:
-                            for exe_hit in glob.glob(pattern):
-                                exe_name = os.path.basename(exe_hit).lower()
-                                if "uninstall" not in exe_name and "update" not in exe_name:
-                                    self._app_index[q] = exe_hit
-                                    return exe_hit
-            except Exception:
-                continue
+        if len(q) >= 3:
+            prog_roots = [
+                os.path.expandvars(r"%LOCALAPPDATA%\Programs"),
+                os.path.expandvars(r"%LOCALAPPDATA%"),
+                os.path.expandvars(r"%APPDATA%"),
+                os.path.expandvars(r"%PROGRAMFILES%"),
+                os.path.expandvars(r"%PROGRAMFILES(X86)%"),
+            ]
+            q_nospace = q.replace(" ", "")
+            for p_root in prog_roots:
+                if not p_root or not os.path.isdir(p_root):
+                    continue
+                try:
+                    for entry in os.scandir(p_root):
+                        if not entry.is_dir():
+                            continue
+                        folder_low = entry.name.lower().replace(" ", "")
+                        if q_nospace == folder_low or (len(q_nospace) >= 4 and (q_nospace in folder_low or folder_low in q_nospace)):
+                            for pattern in [
+                                os.path.join(entry.path, "*.exe"),
+                                os.path.join(entry.path, "app-*", "*.exe"),
+                                os.path.join(entry.path, "bin", "*.exe"),
+                                os.path.join(entry.path, "Application", "*.exe"),
+                            ]:
+                                for exe_hit in glob.glob(pattern):
+                                    exe_name = os.path.basename(exe_hit).lower()
+                                    if "uninstall" not in exe_name and "update" not in exe_name:
+                                        self._app_index[q] = exe_hit
+                                        return exe_hit
+                except Exception:
+                    continue
 
         return None
 
@@ -470,6 +476,11 @@ class SystemController:
         if norm_key != cleaned.lower():
             candidates.append(norm_key)
 
+        # In simulation mode (execute_os_actions=False), well-known registered apps succeed virtually
+        if not self.execute_os_actions and (norm_key in WINDOWS_APP_ALIASES or cleaned.lower() in WINDOWS_APP_ALIASES):
+            self.logger.info("Simulation mode (execute_os_actions=False): Virtual launch of '%s'", cleaned)
+            return True, 99999, f"Opened {cleaned}."
+
         # Stage 1 & 2: Alias paths, glob patterns, URI schemes, and PATH binaries
         for candidate in candidates:
             expanded = os.path.expanduser(os.path.expandvars(candidate)).strip()
@@ -531,8 +542,10 @@ class SystemController:
             if ok_uwp:
                 return True, pid_uwp, f"Opened {cleaned}."
 
-        self.logger.info("Application '%s' not found locally; recorded in virtual launch state.", cleaned)
-        return True, None, f"Opened {cleaned}."
+        self.logger.warning("Application \'%s\' not found locally.", cleaned)
+
+
+        return False, None, f"Could not find {cleaned} installed on your system."
 
     def _spawn_executable_or_shortcut(
         self,
@@ -579,11 +592,12 @@ class SystemController:
         `app_query` and launch its `AppID` via `explorer.exe shell:AppsFolder\<AppID>`.
         """
         safe_q = app_query.replace("'", "").replace('"', "").strip()
-        if not safe_q:
+        if not safe_q or len(safe_q) < 3:
             return False, None
 
         ps_script = (
-            f"$app = Get-StartApps | Where-Object {{ $_.Name -like '*{safe_q}*' }} | Select-Object -First 1; "
+            f"$esc = [regex]::Escape('{safe_q}'); "
+            f"$app = Get-StartApps | Where-Object {{ $_.Name -match ('\\b' + $esc + '\\b') }} | Select-Object -First 1; "
             f"if ($app) {{ Start-Process ('shell:AppsFolder\\' + $app.AppID); Write-Output $app.Name }}"
         )
         try:

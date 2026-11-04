@@ -59,12 +59,18 @@ def test_brain_offline_fallback_generator():
 
 def test_brain_ram_pressure_handling():
     base_dir = Path(__file__).resolve().parent.parent
-    config = {"llm": {"n_gpu_layers": 0}}
+    # 1. When unload_on_critical is False (default), critical RAM pressure keeps model resident
+    config_keep = {"llm": {"n_gpu_layers": 0}, "hardware": {"unload_on_critical": False, "ram_critical_threshold_gb": 3.8}}
     bus = EventBus()
-    brain = Brain(config=config, base_dir=base_dir, event_bus=bus)
-
+    brain_keep = Brain(config=config_keep, base_dir=base_dir, event_bus=bus)
     bus.publish(Topics.RAM_PRESSURE, {"level": "critical", "rss_gb": 3.9})
-    assert brain.is_model_loaded is False
+    assert brain_keep.is_model_loaded is brain_keep.model_path.exists()
+
+    # 2. When unload_on_critical is True, critical RAM pressure unloads model
+    config_unload = {"llm": {"n_gpu_layers": 0}, "hardware": {"unload_on_critical": True, "ram_critical_threshold_gb": 3.8}}
+    brain_unload = Brain(config=config_unload, base_dir=base_dir, event_bus=bus)
+    bus.publish(Topics.RAM_PRESSURE, {"level": "critical", "rss_gb": 3.9})
+    assert brain_unload.is_model_loaded is False
 
 
 def test_mock_llama_streaming_and_first_sentence_dispatch(tmp_path: Path):

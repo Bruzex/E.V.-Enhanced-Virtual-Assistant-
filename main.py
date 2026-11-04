@@ -223,9 +223,13 @@ class SystemBridge(QObject):
         self._process = psutil.Process(os.getpid()) if (PSUTIL_AVAILABLE and psutil is not None) else None
 
         hw_cfg = config.get("hardware", {})
-        self.ram_budget_gb: float = float(hw_cfg.get("ram_budget_gb", 4.0))
-        self.ram_warn_gb: float = float(hw_cfg.get("ram_warning_threshold_gb", 3.4))
-        self.ram_crit_gb: float = float(hw_cfg.get("ram_critical_threshold_gb", 3.8))
+        ram_cfg = config.get("ram", {})
+        self.ram_budget_gb: float = float(ram_cfg.get("budget_gb", hw_cfg.get("ram_budget_gb", 12.0)))
+        self.ram_warn_gb: float = float(ram_cfg.get("warning_gb", hw_cfg.get("ram_warning_threshold_gb", 9.5)))
+        self.ram_crit_gb: float = float(ram_cfg.get("critical_gb", hw_cfg.get("ram_critical_threshold_gb", 11.0)))
+        self.unload_on_critical: bool = bool(ram_cfg.get("unload_on_critical", hw_cfg.get("unload_on_critical", False)))
+        self.reload_on_demand: bool = bool(ram_cfg.get("reload_on_demand", hw_cfg.get("reload_on_demand", True)))
+        self._critical_ram_ticks: int = 0
         self.rss_log_interval_s: float = float(hw_cfg.get("rss_log_interval_seconds", 10.0))
         self.peak_rss_gb: float = 0.0
         self._last_rss_log_ts: float = 0.0
@@ -289,7 +293,11 @@ class SystemBridge(QObject):
     def _on_bus_user_command(self, event: Event) -> None:
         text = str(event.payload.get("text", "")).strip()
         confidence = float(event.payload.get("confidence", 1.0))
+        min_conf = getattr(self.intent_router, "min_confidence", 0.50)
         if not text:
+            return
+        if confidence < min_conf:
+            self.logger.info("Dropping user command below min confidence (conf=%.2f < %.2f): '%s'", confidence, min_conf, text)
             return
         threading.Thread(
             target=self._process_command_worker,
@@ -448,23 +456,35 @@ class SystemBridge(QObject):
                 )
 
             if proc_rss_gb >= self.ram_crit_gb:
-                self.logger.warning(
-                    "CRITICAL RAM usage: %.2f GB / %.1f GB budget! Publishing critical RAM pressure.",
-                    proc_rss_gb,
-                    self.ram_budget_gb,
-                )
-                self.bus.publish(
-                    Topics.RAM_PRESSURE,
-                    {"level": "critical", "rss_gb": round(proc_rss_gb, 2)},
-                    source="telemetry",
-                )
+                self._critical_ram_ticks += 1
+                if self.unload_on_critical and self._critical_ram_ticks >= 30:
+                    self.logger.warning(
+                        "CRITICAL RAM usage sustained: %.2f GB / %.1f GB budget! Publishing critical RAM pressure.",
+                        proc_rss_gb,
+                        self.ram_budget_gb,
+                    )
+                    self.bus.publish(
+                        Topics.RAM_PRESSURE,
+                        {"level": "critical", "rss_gb": round(proc_rss_gb, 2)},
+                        source="telemetry",
+                    )
+                else:
+                    self.logger.debug(
+                        "High RAM usage: %.2f GB / %.1f GB budget (unload_on_critical=%s, tick=%d)",
+                        proc_rss_gb,
+                        self.ram_budget_gb,
+                        self.unload_on_critical,
+                        self._critical_ram_ticks,
+                    )
                 gc.collect()
-            elif proc_rss_gb >= self.ram_warn_gb:
-                self.bus.publish(
-                    Topics.RAM_PRESSURE,
-                    {"level": "warning", "rss_gb": round(proc_rss_gb, 2)},
-                    source="telemetry",
-                )
+            else:
+                self._critical_ram_ticks = 0
+                if proc_rss_gb >= self.ram_warn_gb:
+                    self.bus.publish(
+                        Topics.RAM_PRESSURE,
+                        {"level": "warning", "rss_gb": round(proc_rss_gb, 2)},
+                        source="telemetry",
+                    )
 
             self.brain.check_idle_unload()
 

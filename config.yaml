@@ -13,13 +13,22 @@ app:
   rss_log_file: "logs/rss.log"
 
 hardware:
-  ram_budget_gb: 8.0
-  ram_warning_threshold_gb: 3.4
-  ram_critical_threshold_gb: 3.8
+  ram_budget_gb: 12.0
+  ram_warning_threshold_gb: 9.5
+  ram_critical_threshold_gb: 11.0
   monitor_interval_ms: 1000
   rss_log_interval_seconds: 10
   strict_cpu_only: true
   aggressive_gc: true
+  unload_on_critical: false
+  reload_on_demand: true
+
+ram:
+  budget_gb: 12.0
+  warning_gb: 9.5
+  critical_gb: 11.0
+  unload_on_critical: false
+  reload_on_demand: true
 
 llm:
   provider: "llama_cpp"
@@ -34,7 +43,7 @@ llm:
   use_mlock: false
   temperature: 0.3
   top_p: 0.9
-  max_tokens: 80
+  max_tokens: 120
   unload_after_idle_seconds: 0
   system_prompt: >
     E.V., Enhanced Virtual Assistant, created by Bruprog.
@@ -59,7 +68,7 @@ voice:
     command_timeout_seconds: 20.0
     session_timeout_seconds: 90.0
     energy_gate_threshold: 0.0018
-    barge_in_energy_threshold: 0.08
+    barge_in_energy_threshold: 0.025
     confirmation_sound: true
 
   stt:
@@ -67,7 +76,8 @@ voice:
     model_path: "models/vosk-model-en-in-0.5"
     sample_rate: 16000
     chunk_size: 2000
-    min_confidence: 0.38
+    min_confidence: 0.50
+    silence_timeout_seconds: 0.8
     tts_cooldown_ms: 500
     input_device_index: null
 
